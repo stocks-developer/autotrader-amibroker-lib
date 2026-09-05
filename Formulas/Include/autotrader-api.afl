@@ -315,7 +315,7 @@ function placeOrderAdvanced(variety, account, exchange, symbol,
 			amoStr									+ AT_COMMA +
 			publishTime							+ AT_COMMA +
 			strategyId 							+ AT_COMMA +
-			comments;
+			commentsStr;
 
 		if(AT_DEBUG) {
 			message = "Order csv data: " + csv;

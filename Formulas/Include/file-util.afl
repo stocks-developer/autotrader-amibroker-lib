@@ -33,16 +33,19 @@ FILE_DEFAULT_MAX_LINES_SAFETY_CHECK = 100000;
 function fileWriteLineAdvanced( filePath, mode, shared, retryCount, line )
 {
 
-	result = True;
+	// Start with False and flip to True only when a write actually succeeds.
+	// A retry that succeeds must not report failure, otherwise the caller
+	// reports the line as unwritten while it is already in the file.
+	result = False;
 
 	for( i = 1; i <= retryCount; i++ ) {
 		fh = fopen(filePath, mode, shared);
 		if (fh) {
 			fputs( line + "\n", fh );
 			fclose( fh );
+			result = True;
 			break;
 		} else {
-			result = False;
 			_TRACE("[Attempt: " + i + "] Failed to write line: " + line);
 		}
 	}
