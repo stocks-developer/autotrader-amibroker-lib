@@ -1,0 +1,1653 @@
+/******************************************************************************
+*
+* AutoTrader Web automated trading API functions -- direct (HTTP) version.
+* DO NOT MODIFY THIS FILE
+* Version: 1.0
+*
+* The same functions as autotrader-api.afl, talking to AutoTrader Web over the
+* internet instead of through files and the Desktop Client. Your strategy code
+* does not change: placeOrder(), getOrderStatus(), getPositionMtm() and the
+* rest keep their names, their arguments and their meaning.
+*
+* THREE DIFFERENCES worth knowing before you switch:
+*
+* 1. placeOrder() now waits for the broker's answer and returns the BROKER's
+*    order id, not an internally generated one. That is the id you pass to
+*    getOrderStatus(), modifyOrder() and cancelOrder(), and it is the same id
+*    you see in your broker's order book.
+*
+* 2. placeOrder() can return the word held in AT_UNCONFIRMED. That means the
+*    order reached the broker and the broker never confirmed it, so it may be
+*    live. Do not send it again -- look at your order book.
+*
+* 3. The portfolio summary functions (getPortfolioMtm, getPortfolioPnl, the
+*    position and order counts) are not part of this version. They were
+*    calculated by the Desktop Client, which is what this library exists to do
+*    without. Use the position and order functions instead.
+*
+******************************************************************************/
+
+/***************************** CONSTANTS - START *****************************/
+
+AT_LAST_ORDER_TIME_KEY = "AT_LAST_ORDER_TIME";
+AT_LAST_ORDER_TRADE_TYPE_KEY = "AT_LAST_ORDER_TRADE_TYPE";
+
+/*
+* Column 4 of the orders CSV -- the broker's own order id.
+*
+* The file based library looks orders up by column 3, the publisher id it
+* generated before sending the order. This library never makes one: it is
+* handed the broker's id when the order is accepted, so that is what every
+* get...Order...() function matches on.
+*/
+AT_ORDER_ID_COLUMN = 4;
+
+/****************************** CONSTANTS - END ******************************/
+
+
+
+/***************************** PARAMETERS - START ****************************/
+
+_SECTION_BEGIN("AutoTrader");
+
+AT_EXCHANGE = ParamList("Exchange", "NSE|BSE|MCX");
+
+AT_SYMBOL = ParamStr("Symbol", Name());
+
+AT_ACCOUNT = ParamStr("Account", "Pseudo Account");
+
+AT_PRODUCT_TYPE = ParamList("Product Type", "INTRADAY|DELIVERY|NORMAL");
+
+AT_QUANTITY = Param("Quantity", 1, 0, 300000, 10);
+
+AT_USE_PRECISION = ParamToggle("Use price precision, used for rounding price", "OFF|ON", 0);
+
+AT_PRICE_PRECISION = StrToNum(ParamList(
+	"Price precision, used for rounding price", "4|3|2|1|0"));
+
+AT_DEBUG = ParamToggle("Print Additional Logs", "OFF|ON", 0);
+
+/*
+* Used for avoiding repeat orders. Repeat orders are back to back buy or 
+* sell orders. The system will not accept an order in this many seconds, 
+* if an order for same stock, tradeType was sent earlier from the same chart.
+* If you want to execute back to back order then you can set this 
+* parameter to 0.
+* If you want to avoid repeat orders generated due to duplicate signals 
+* then set this parameter to a value higher than your candle interval.
+* 
+* Example: 
+* 1. Assume AT_AVOID_REPEAT_ORDER_DELAY value is set for 120 seconds & 
+* 		your chart uses 1-minute (60 seconds) candle.
+* 2. System receives a BUY order for SBIN at time 10:15:15.
+* 3. System will place it.
+* 4. After 15 seconds, system receives another BUY order for SBIN 
+* 		at time 10:15:30.
+* 5. The system will NOT place this order, as the symbol & tradeType 
+* 		are same and the order came with 120 seconds of previous order.
+*/
+AT_AVOID_REPEAT_ORDER_DELAY = Param("Avoid repeat orders (in seconds)", 
+	26000, 0, 26000, 5);
+
+_SECTION_END();
+
+/***************************** PARAMETERS - END *****************************/
+
+
+/*****************************************************************************/
+/************************* REPEAT ORDER GUARD - START ************************/
+/*****************************************************************************/
+
+function accountSymbolKey(account, symbol) {
+	return account + "-" + symbol;
+}
+
+/*
+* Saves last order time, in a static variable.
+*/
+procedure saveLastOrderTime(account, symbol, orderTime) {
+	saveStaticVariable(accountSymbolKey(account, symbol),
+		AT_LAST_ORDER_TIME_KEY, orderTime);
+}
+
+/*
+* Fetches the last order time (if available).
+*/
+function readLastOrderTime(account, symbol) {
+	return readStaticVariable(accountSymbolKey(account, symbol),
+		AT_LAST_ORDER_TIME_KEY);
+}
+
+/*
+* Saves last order trade type, in a static variable.
+*/
+procedure saveLastOrderTradeType(account, symbol, tradeType) {
+	saveStaticVariableText(accountSymbolKey(account, symbol),
+	AT_LAST_ORDER_TRADE_TYPE_KEY, StrToUpper(tradeType));
+}
+
+/*
+* Fetches the last order trade type (if available).
+*/
+function readLastOrderTradeType(account, symbol) {
+	return readStaticVariableText(accountSymbolKey(account, symbol),
+		AT_LAST_ORDER_TRADE_TYPE_KEY);
+}
+
+/*
+* Converts order to easy to read text format.
+*/
+function orderString(variety, symbol, tradeType, orderType, quantity,
+	price, triggerPrice, target, stoploss, trailingStoploss) {
+	conciseForm = symbol + "|" + tradeType + "|" + orderType + "|" +
+		quantity + "@" + price;
+
+	if(variety == AT_VARIETY_BO) {
+		result = "Bracket Order [" + conciseForm + "|" +
+			"t=" + target + "|" + "sl=" + stoploss + "|" +
+			"tr. sl=" + trailingStoploss + "]";
+	} else if (variety == AT_VARIETY_CO) {
+		result = "Cover Order [" + conciseForm + "|" + "trigger=" +
+			triggerPrice +  "]";
+	} else {
+		result = "Regular Order [" + conciseForm + "]";
+	}
+
+	return result;
+}
+
+/*
+* Checks whether we have a duplicate signal. This is done to overcome a limitation
+* in AmiBroker, which keeps on giving same signal for every tick
+* until the candle is complete.
+*/
+function isDuplicateSignal(account, tradeType, symbol) {
+	duplicate = False;
+
+	time = readLastOrderTime(account, symbol);
+	lastTradeType = readLastOrderTradeType(account, symbol);
+
+	if(time > 0) {
+		difference = DateTimeDiff(Now(5), time);
+
+		if(difference < AT_AVOID_REPEAT_ORDER_DELAY AND
+			lastTradeType == StrToUpper(tradeType)) {
+
+			message = "ERROR: Duplicate signal. Previous order = "
+				+ lastTradeType + ", Current order = " + tradeType;
+			logError(message);
+			_TRACE(message);
+
+			if(AT_DEBUG) {
+				message = "Last order time is = " + DateTimeToStr(time);
+				logDebug(message);
+				_TRACE(message);
+
+				message = "Difference of [" + difference +
+					"] seconds is less than avoid duplicate order duration of ["
+					+ AT_AVOID_REPEAT_ORDER_DELAY + "] seconds.";
+				logDebug(message);
+				_TRACE(message);
+			}
+
+			duplicate = True;
+		}
+	}
+
+	return duplicate;
+}
+
+/*****************************************************************************/
+/************************** REPEAT ORDER GUARD - END *************************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/************************* PORTFOLIO READS - START ***************************/
+/*****************************************************************************/
+
+/*
+* The four functions below are the only difference between this library and the
+* file based one, as far as reading is concerned. Everything under them -- some
+* two hundred get...() functions -- is character for character the same,
+* because the data is the same data in the same column order. Only where it
+* comes from has changed: a request to AutoTrader Web rather than a file the
+* Desktop Client wrote.
+*/
+
+/*
+* Reads orders and returns a column value for the given order id.
+*
+* Matches the BROKER's order id, column 4. The file based library matches
+* column 3, the publisher id, which this library never creates.
+*/
+function readOrderColumn(pseudoAccount, orderId, columnIndex) {
+	return atReadColumn(pseudoAccount, AT_DS_ORDERS, orderId,
+		AT_ORDER_ID_COLUMN, columnIndex);
+}
+
+/*
+* Reads positions and returns a column value for the given position id.
+* Position id is a combination of category, type, independentExchange & independentSymbol.
+*/
+function readPositionColumnInternal(pseudoAccount,
+	category, categoryColumnIndex,	type, typeColumnIndex,
+	independentExchange, independentExchangeColumnIndex,
+	independentSymbol, independentSymbolColumnIndex, columnIndex) {
+
+	return atReadColumn4(pseudoAccount, AT_DS_POSITIONS,
+		category, categoryColumnIndex,
+		type, typeColumnIndex,
+		independentExchange, independentExchangeColumnIndex,
+		independentSymbol, independentSymbolColumnIndex,
+		columnIndex);
+}
+
+/*
+* Reads positions and returns a column value for the given position id.
+* Position id is a combination of category, type, independentExchange & independentSymbol.
+*/
+function readPositionColumn(pseudoAccount,
+	category, type, independentExchange,	independentSymbol, columnIndex) {
+
+	return readPositionColumnInternal(pseudoAccount, category, 4, type, 3,
+		independentExchange, 5, independentSymbol, 6, columnIndex);
+}
+
+/*
+* Reads margins and returns a column value for the given margin category.
+*/
+function readMarginColumn(pseudoAccount, category, columnIndex) {
+	return atReadColumn(pseudoAccount, AT_DS_MARGINS, category, 3, columnIndex);
+}
+
+/*
+* Reads holdings and returns a column value for the given symbol.
+*/
+function readHoldingColumn(pseudoAccount, symbol, columnIndex) {
+	return atReadColumn(pseudoAccount, AT_DS_HOLDINGS, symbol, 5, columnIndex);
+}
+
+/*****************************************************************************/
+/************************** PORTFOLIO READS - END ****************************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/*********************** PLACE ORDER FUNCTIONS - START ***********************/
+/*****************************************************************************/
+
+/*
+* True if the value returned by a place...Order() function means the order may
+* be live at the broker but was never confirmed.
+*
+* Use it wherever your strategy decides what to do after placing:
+*
+*   orderId = placeOrder(...);
+*   if(isOrderUnconfirmed(orderId)) {
+*       // Do NOT place it again. Something may already be working.
+*   }
+*/
+function isOrderUnconfirmed(orderId) {
+	return orderId == AT_UNCONFIRMED;
+}
+
+/*
+* An advanced function to place orders.
+*
+* Returns the broker's order id when the order is accepted, AT_UNCONFIRMED when
+* it may have been placed but was not confirmed, and blank when it definitely
+* was not placed.
+*/
+function placeOrderAdvanced(variety, account, exchange, symbol,
+	tradeType, orderType, productType,
+	quantity, price, triggerPrice,
+	target, stoploss, trailingStoploss,
+	disclosedQuantity, validity, amo,
+	strategyId, comments, validate) {
+
+	// Initially order id is blank
+	orderId = "";
+
+	orderStr = orderString(variety, symbol, tradeType, orderType, quantity,
+		price, triggerPrice, target, stoploss, trailingStoploss);
+
+	if(AT_DEBUG) {
+		message = "Placing order: " + orderStr;
+		logDebug(message);
+		_TRACE(message);
+	}
+
+	proceed = TRUE;
+	if(validate) {
+		// Perform validation
+
+		// Perform duplicate signal check
+		if(isDuplicateSignal(account, tradeType, symbol)) {
+			message = "Order failed validation: " + orderStr;
+			logError(message);
+			_TRACE(message);
+
+			proceed = False;
+		}
+	}
+
+	if(proceed) {
+
+		// Save order generation time
+		publishTime = convertIntegerToString(
+			convertDateTimeToMillisSinceEpoch(LastValue(DateTime())));
+
+		// Convert data into text in order to build the command
+
+		if(AT_USE_PRECISION) {
+			priceStr = StrFormat("%.5f", prec(
+				IIF( price < 0, 0, price ), AT_PRICE_PRECISION));
+			triggerPriceStr = StrFormat("%.5f", prec(
+				IIF( triggerPrice < 0, 0, triggerPrice ), AT_PRICE_PRECISION));
+			targetStr = StrFormat("%.5f", prec(
+				IIF( target < 0, 0, target ), AT_PRICE_PRECISION));
+			stoplossStr = StrFormat("%.5f", prec(
+				IIF( stoploss < 0, 0, stoploss ), AT_PRICE_PRECISION));
+			trailingStoplossStr = StrFormat("%.5f", prec(
+				IIF( trailingStoploss < 0, 0, trailingStoploss ),
+				AT_PRICE_PRECISION));
+		} else {
+			priceStr = NumToStr( price, 1.4, False );
+			triggerPriceStr = NumToStr( triggerPrice, 1.4, False );
+			targetStr = NumToStr( target, 1.4, False );
+			stoplossStr = NumToStr( stoploss, 1.4, False );
+			trailingStoplossStr = NumToStr( trailingStoploss, 1.4, False );
+		}
+
+
+		if(amo) {
+			amoStr = "true";
+		} else {
+			amoStr = "false";
+		}
+
+		// Handling for a comma in comments
+		commentsStr = StrReplace(comments, AT_COMMA, ";" );
+
+		/*
+		* Column three is the publisher id and is deliberately left empty. The
+		* Desktop Client generates one so it can refer to an order it has not
+		* yet heard back about; here the reply carries the broker's own id, so
+		* there is nothing to invent and nothing to reconcile later.
+		*
+		* Every other column keeps its position, so the server parses this with
+		* the same code that has always parsed it.
+		*/
+		csv = AT_PLACE_ORDER_CMD 	+ AT_COMMA +
+			account 								+ AT_COMMA +
+			AT_BLANK 								+ AT_COMMA +
+			variety 									+ AT_COMMA +
+			exchange 								+ AT_COMMA +
+			symbol 									+ AT_COMMA +
+			tradeType 								+ AT_COMMA +
+			orderType 								+ AT_COMMA +
+			productType 							+ AT_COMMA +
+			quantity 								+ AT_COMMA +
+			priceStr 								+ AT_COMMA +
+			triggerPriceStr 						+ AT_COMMA +
+			targetStr 								+ AT_COMMA +
+			stoplossStr 							+ AT_COMMA +
+			trailingStoplossStr 				+ AT_COMMA +
+			disclosedQuantity 					+ AT_COMMA +
+			validity 									+ AT_COMMA +
+			amoStr									+ AT_COMMA +
+			publishTime							+ AT_COMMA +
+			strategyId 							+ AT_COMMA +
+			commentsStr;
+
+		if(AT_DEBUG) {
+			message = "Order csv data: " + csv;
+			logDebug(message);
+			_TRACE(message);
+		}
+
+		status = atSendCommand(csv);
+
+		if(status == AT_HTTP_OK) {
+			orderId = atPipeField(atHttpResponse, 2);
+
+			saveLastOrderTradeType(account, symbol, tradeType);
+			saveLastOrderTime(account, symbol, Now(5));
+
+			message = "Order placed: [" + orderStr + "], order id: " + orderId;
+			logInfo(message);
+			_TRACE(message);
+
+		} else if(atHttpAction == AT_ACTION_CHECK) {
+			/*
+			* The order reached the broker and nobody confirmed it. This is the
+			* one outcome that must not come back as a plain failure: a
+			* strategy that treats blank as "it did not go" would place the
+			* same order a second time, and both could fill.
+			*
+			* The repeat order guard is armed as if the order had succeeded, so
+			* an unattended chart cannot re-send it on the next tick either.
+			*/
+			orderId = AT_UNCONFIRMED;
+
+			saveLastOrderTradeType(account, symbol, tradeType);
+			saveLastOrderTime(account, symbol, Now(5));
+
+			message = "SD-ERR-AB-PLACE: Order NOT CONFIRMED: [" + orderStr +
+				"]. " + atHttpMessage;
+			logError(message);
+			_TRACE(message);
+
+			message = "SD-ERR-AB-PLACE: Do not place it again. Check your order book first.";
+			logError(message);
+			_TRACE(message);
+
+		} else {
+			message = "SD-ERR-AB-PLACE: Order placement failed: [" + orderStr +
+				"]. " + atHttpMessage;
+			logError(message);
+			_TRACE(message);
+
+			orderId = "";
+		}
+	}
+
+	return orderId;
+}
+
+/*
+* A function to place regular orders. Returns the broker's order id on
+* successful order placement; otherwise returns blank or AT_UNCONFIRMED.
+*
+* If a parameter is not applicable, then either pass blank (for text parameter)
+* or zero (for numeric parameter).
+*/
+function placeOrder(account, exchange, symbol, tradeType, orderType,
+	productType, quantity, price, triggerPrice, validate) {
+
+	return placeOrderAdvanced(defaultVariety(), account, exchange, symbol,
+		tradeType, orderType, productType,
+		quantity, price, triggerPrice,
+		defaultTarget(), defaultStoploss(), defaultTrailingStoploss(),
+		defaultDisclosedQuantity(), defaultValidity(), defaultAmo(),
+		defaultStrategyId(), defaultComments(), validate);
+
+}
+
+/*
+* A function to place bracket orders. Returns the broker's order id on
+* successful order placement; otherwise returns blank or AT_UNCONFIRMED.
+*
+* If a parameter is not applicable, then either pass blank (for text parameter)
+* or zero (for numeric parameter).
+*/
+function placeBracketOrder(account, exchange, symbol, tradeType, orderType,
+	quantity, price, triggerPrice, target, stoploss, trailingStoploss, validate) {
+
+	return placeOrderAdvanced(AT_VARIETY_BO, account, exchange, symbol,
+		tradeType, orderType, AT_PRODUCT_INTRADAY,
+		quantity, price, triggerPrice,
+		target, stoploss, trailingStoploss,
+		defaultDisclosedQuantity(), defaultValidity(), defaultAmo(),
+		defaultStrategyId(), defaultComments(), validate);
+
+}
+
+/*
+* A function to place cover orders. Returns the broker's order id on
+* successful order placement; otherwise returns blank or AT_UNCONFIRMED.
+*
+* If a parameter is not applicable, then either pass blank (for text parameter)
+* or zero (for numeric parameter).
+*/
+function placeCoverOrder(account, exchange, symbol, tradeType, orderType,
+	quantity, price, triggerPrice, validate) {
+
+	return placeOrderAdvanced(AT_VARIETY_CO, account, exchange, symbol,
+		tradeType, orderType, AT_PRODUCT_INTRADAY,
+		quantity, price, triggerPrice,
+		defaultTarget(), defaultStoploss(), defaultTrailingStoploss(),
+		defaultDisclosedQuantity(), defaultValidity(), defaultAmo(),
+		defaultStrategyId(), defaultComments(), validate);
+
+}
+
+/*****************************************************************************/
+/************************ PLACE ORDER FUNCTIONS - END ************************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/*********************** MODIFY ORDER FUNCTIONS - START **********************/
+/*****************************************************************************/
+
+procedure printOrderModification(account, orderId, orderType, quantity,
+	price, triggerPrice) {
+
+	message = "Modification: ";
+	message += ("[Account = " + account + "]");
+	message += ("[Order Id = " + orderId + "]");
+
+	if(orderType != "") {
+		message += ("[OrderType = " + orderType + "]");
+	}
+
+	if(quantity > 0) {
+		message += ("[Quantity = " + quantity + "]");
+	}
+
+	if(price > 0) {
+		message += ("[Price = " + price + "]");
+	}
+
+	if(triggerPrice > 0) {
+		message += ("[Trigger Price = " + triggerPrice + "]");
+	}
+
+	logDebug(message);
+	_TRACE(message);
+}
+
+/**
+* Modifies the order. Returns True when the server confirms the modification;
+* otherwise returns False.
+*
+* Pass the order id you received from a place...Order() function -- the
+* broker's order id.
+*
+* If a parameter is not applicable, then either pass blank (for text parameter)
+* or zero (for numeric parameter).
+*/
+function modifyOrder(account, orderId, orderType, quantity, price,
+	triggerPrice) {
+
+	if(AT_USE_PRECISION) {
+		priceStr = StrFormat("%.5f", prec(price, AT_PRICE_PRECISION));
+		triggerPriceStr = StrFormat("%.5f",
+			prec(triggerPrice, AT_PRICE_PRECISION));
+	} else {
+		priceStr = NumToStr( price, 1.4, False );
+		triggerPriceStr = NumToStr( triggerPrice, 1.4, False );
+	}
+
+	csv = AT_MODIFY_ORDER_BY_ID_CMD	+ AT_COMMA +
+		account 									+ AT_COMMA +
+		orderId 										+ AT_COMMA +
+		orderType 									+ AT_COMMA +
+		quantity 									+ AT_COMMA +
+		priceStr 									+ AT_COMMA +
+		triggerPriceStr;
+
+	printOrderModification(account, orderId, orderType, quantity, price,
+		triggerPrice);
+
+	return atRunCommand(csv, "Order modify [" + orderId + "]");
+}
+
+function modifyOrderPrice(account, orderId, price) {
+	return modifyOrder(account, orderId, AT_BLANK, 0, price, 0);
+}
+
+function modifyOrderQuantity(account, orderId, quantity) {
+	return modifyOrder(account, orderId, AT_BLANK, quantity, 0, 0);
+}
+
+/*****************************************************************************/
+/************************ MODIFY ORDER FUNCTIONS - END ***********************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/*********************** CANCEL/EXIT ORDER FUNCTIONS - START **********************/
+/*****************************************************************************/
+
+/*
+* Sends cancel order request to AutoTrader. Pass account & the broker's order
+* id. Returns True when the server confirms the cancellation.
+*/
+function cancelOrder(account, id) {
+	if(AT_DEBUG) {
+		message = "Cancelling order, order id: " + id;
+		logDebug(message);
+		_TRACE(message);
+	}
+
+	csv = AT_CANCEL_ORDER_BY_ID_CMD	+ AT_COMMA +
+			account 									+ AT_COMMA +
+			id;
+
+	return atRunCommand(csv, "Order cancel [" + id + "]");
+}
+
+/*
+* Cancels child orders of a bracket or cover order.
+* This function is useful for exiting from bracket and cover order.
+* Pass the account & the broker's order id you received after placing a
+* bracket or cover order.
+*/
+function cancelOrderChildren(account, id) {
+	if(AT_DEBUG) {
+		message = "Inside cancelOrderChildren, order id: " + id;
+		logDebug(message);
+		_TRACE(message);
+	}
+
+	csv = AT_CANCEL_CHILD_ORDER_BY_ID_CMD	+ AT_COMMA +
+			account 											+ AT_COMMA +
+			id;
+
+	return atRunCommand(csv, "Order cancel children [" + id + "]");
+}
+
+/*
+* Cancels or exits from order. This function is useful for exiting from bracket and cover order.
+* If the order is OPEN, it will be cancelled. If it is executed, system will cancel it's child orders;
+* which will result in exiting the position.
+* Pass account & the broker's order id you received after placing a bracket or
+* cover order.
+*/
+function cancelOrExitOrder(account, id) {
+	if(AT_DEBUG) {
+		message = "Inside cancelOrExitOrder, order id = " + id;
+		logDebug(message);
+		_TRACE(message);
+	}
+
+	// Cancel the Bracket order if it is open
+	cancelOrder(account, id);
+
+	// Exit from bracket order
+	cancelOrderChildren(account, id);
+}
+
+/*
+* Cancels all open orders for the given account. Returns True when the server
+* confirms it.
+*/
+function cancelAllOrders(account) {
+	if(AT_DEBUG) {
+		message = "Cancelling all open orders for account: " + account;
+		logDebug(message);
+		_TRACE(message);
+	}
+
+	csv = AT_CANCEL_ALL_ORDERS_CMD + AT_COMMA + account;
+
+	return atRunCommand(csv, "Cancel all open orders [" + account + "]");
+}
+
+/*****************************************************************************/
+/************************ CANCEL/EXIT ORDER FUNCTIONS - END ***********************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/************************ SQUARE OFF FUNCTIONS - START ***********************/
+/*****************************************************************************/
+
+/**
+* Submits a square-off request for the given position. Returns True when the
+* server confirms it.
+*
+* pseudoAccount - account to which the position belongs
+* category - position category (DAY, NET). Pass DAY if you are not sure.
+* type - position type (MIS, NRML, CNC, BO, CO)
+* independentExchange - broker independent exchange
+* independentSymbol - broker independent symbol
+*/
+function squareOffPosition(pseudoAccount, category, type,
+	independentExchange, independentSymbol) {
+
+	positionStr = pseudoAccount 				+ AT_PIPE +
+						category						+ AT_PIPE +
+						type								+ AT_PIPE +
+						independentExchange	+ AT_PIPE +
+						independentSymbol;
+
+	if(AT_DEBUG) {
+		message = "Inside squareOffPosition, position: [" + positionStr + "]";
+		logDebug(message);
+		_TRACE(message);
+	}
+
+	csv = AT_SQUARE_OFF_POSITION 		+ AT_COMMA +
+			pseudoAccount 							+ AT_COMMA +
+			category									+ AT_COMMA +
+			type											+ AT_COMMA +
+			independentExchange				+ AT_COMMA +
+			independentSymbol;
+
+	return atRunCommand(csv, "Square-off position [" + positionStr + "]");
+}
+
+/**
+* Submits a square-off request for the given account. Returns True when the
+* server confirms it.
+* Server will square-off all open positions in the given account.
+*
+* pseudoAccount - account to which the position belongs
+* category - position category (DAY, NET). Pass DAY if you are not sure.
+*/
+function squareOffPortfolio(pseudoAccount, category) {
+
+	portfolioStr = pseudoAccount 				+ AT_PIPE +
+						category;
+
+	if(AT_DEBUG) {
+		message = "Inside squareOffPortfolio, portfolio: [" + portfolioStr + "]";
+		logDebug(message);
+		_TRACE(message);
+	}
+
+	csv = AT_SQUARE_OFF_PORTFOLIO 	+ AT_COMMA +
+			pseudoAccount 							+ AT_COMMA +
+			category;
+
+	return atRunCommand(csv, "Square-off portfolio [" + portfolioStr + "]");
+}
+
+/*****************************************************************************/
+/************************ SQUARE OFF FUNCTIONS - END ***********************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/************************ ORDER DETAIL FUNCTIONS - START ***********************/
+/*****************************************************************************/
+
+/*
+* Retrieve order's trading account.
+*/
+function getOrderTradingAccount(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 2);
+}
+
+/*
+* Retrieve order's trading platform id.
+*/
+function getOrderId(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 4);
+}
+
+/*
+* Retrieve order's exchange id.
+*/
+function getOrderExchangeId(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 5);
+}
+
+/*
+* Retrieve order's variety (REGULAR, BO, CO).
+*/
+function getOrderVariety(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 6);
+}
+
+/*
+* Retrieve order's (platform independent) exchange.
+*/
+function getOrderIndependentExchange(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 7);
+}
+
+/*
+* Retrieve order's (platform independent) symbol.
+*/
+function getOrderIndependentSymbol(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 8);
+}
+
+/*
+* Retrieve order's trade type (BUY, SELL).
+*/
+function getOrderTradeType(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 9);
+}
+
+/*
+* Retrieve order's order type (LIMIT, MARKET, STOP_LOSS, SL_MARKET).
+*/
+function getOrderOrderType(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 10);
+}
+
+/*
+* Retrieve order's product type (INTRADAY, DELIVERY, NORMAL).
+*/
+function getOrderProductType(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 11);
+}
+
+/*
+* Retrieve order's quantity.
+*/
+function getOrderQuantity(pseudoAccount, orderId) {
+	return StrToNum(readOrderColumn(pseudoAccount, orderId, 12));
+}
+
+/*
+* Retrieve order's price.
+*/
+function getOrderPrice(pseudoAccount, orderId) {
+	return StrToNum(readOrderColumn(pseudoAccount, orderId, 13));
+}
+
+/*
+* Retrieve order's trigger price.
+*/
+function getOrderTriggerPrice(pseudoAccount, orderId) {
+	return StrToNum(readOrderColumn(pseudoAccount, orderId, 14));
+}
+
+/*
+* Retrieve order's filled quantity.
+*/
+function getOrderFilledQuantity(pseudoAccount, orderId) {
+	return StrToNum(readOrderColumn(pseudoAccount, orderId, 15));
+}
+
+/*
+* Retrieve order's pending quantity.
+*/
+function getOrderPendingQuantity(pseudoAccount, orderId) {
+	return StrToNum(readOrderColumn(pseudoAccount, orderId, 16));
+}
+
+/*
+* Retrieve order's (platform independent) status.
+* (OPEN, COMPLETE, CANCELLED, REJECTED, TRIGGER_PENDING, UNKNOWN)
+*/
+function getOrderStatus(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 17);
+}
+
+/*
+* Retrieve order's status message or rejection reason.
+*/
+function getOrderStatusMessage(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 18);
+}
+
+/*
+* Retrieve order's validity (DAY, IOC).
+*/
+function getOrderValidity(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 19);
+}
+
+/*
+* Retrieve order's average price at which it got traded.
+*/
+function getOrderAveragePrice(pseudoAccount, orderId) {
+	return StrToNum(readOrderColumn(pseudoAccount, orderId, 20));
+}
+
+/*
+* Retrieve order's parent order id. The id of parent bracket or cover order.
+*/
+function getOrderParentOrderId(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 21);
+}
+
+/*
+* Retrieve order's disclosed quantity.
+*/
+function getOrderDisclosedQuantity(pseudoAccount, orderId) {
+	return StrToNum(readOrderColumn(pseudoAccount, orderId, 22));
+}
+
+/*
+* Retrieve order's exchange time as a string (YYYY-MM-DD HH:MM:SS.MILLIS).
+*/
+function getOrderExchangeTime(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 23);
+}
+
+/*
+* Retrieve order's platform time as a string (YYYY-MM-DD HH:MM:SS.MILLIS).
+*/
+function getOrderPlatformTime(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 24);
+}
+
+/*
+* Retrieve order's AMO (after market order) flag. (true/false)
+*/
+function getOrderAmo(pseudoAccount, orderId) {
+	flag = readOrderColumn(pseudoAccount, orderId, 25);
+	return (StrToLower(flag) == "true");	
+}
+
+/*
+* Retrieve order's comments.
+*/
+function getOrderComments(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 26);
+}
+
+/*
+* Retrieve order's raw (platform specific) status.
+*/
+function getOrderRawStatus(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 27);
+}
+
+/*
+* Retrieve order's (platform specific) exchange.
+*/
+function getOrderExchange(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 28);
+}
+
+/*
+* Retrieve order's (platform specific) symbol.
+*/
+function getOrderSymbol(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 29);
+}
+
+/*
+* Retrieve order's date (DD-MM-YYYY).
+*/
+function getOrderDay(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 30);
+}
+
+/*
+* Retrieve order's trading platform.
+*/
+function getOrderPlatform(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 31);
+}
+
+/*
+* Retrieve order's client id (as received from trading platform).
+*/
+function getOrderClientId(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 32);
+}
+
+/*
+* Retrieve order's stock broker.
+*/
+function getOrderStockBroker(pseudoAccount, orderId) {
+	return readOrderColumn(pseudoAccount, orderId, 33);
+}
+
+/*
+* Checks whether order is open.
+* orderId - should be the id returned by placeOrder function when you place an order.
+*/
+function isOrderOpen(pseudoAccount, orderId) {
+	oStatus = getOrderStatus(pseudoAccount, orderId);
+	return (StrToUpper(oStatus) == "OPEN" OR StrToUpper(oStatus) == "TRIGGER_PENDING");
+}
+
+/*
+* Checks whether order is complete.
+* orderId - should be the id returned by placeOrder function when you place an order.
+*/
+function isOrderComplete(pseudoAccount, orderId) {
+	oStatus = getOrderStatus(pseudoAccount, orderId);	
+	return StrToUpper(oStatus) == "COMPLETE";
+}
+
+/*
+* Checks whether order is rejected.
+* id - should be the id returned by placeOrder function when you place an order.
+*/
+function isOrderRejected(pseudoAccount, orderId) {
+	oStatus = getOrderStatus(pseudoAccount, orderId);	
+	return StrToUpper(oStatus) == "REJECTED";
+}
+
+/*
+* Checks whether order is cancelled.
+* id - should be the id returned by placeOrder function when you place an order.
+*/
+function isOrderCancelled(pseudoAccount, orderId) {
+	oStatus = getOrderStatus(pseudoAccount, orderId);	
+	return StrToUpper(oStatus) == "CANCELLED";
+}
+
+/*****************************************************************************/
+/************************ ORDER DETAIL FUNCTIONS - END ***********************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/********************** POSITION DETAIL FUNCTIONS - START *********************/
+/*****************************************************************************/
+
+/*
+* Retrieve positions's trading account.
+*/
+function getPositionTradingAccount(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 2);
+}
+
+/*
+* Retrieve positions's MTM (Mtm calculated by your stock broker).
+*/
+function getPositionMtm(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 7));
+}
+
+/*
+* Retrieve positions's PNL (Pnl calculated by your stock broker).
+*/
+function getPositionPnl(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 8));
+}
+
+/*
+* Retrieve positions's AT PNL (Pnl calculated by AutoTrader Web).
+*/
+function getPositionAtPnl(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 31));
+}
+
+/*
+* Retrieve positions's buy quantity.
+*/
+function getPositionBuyQuantity(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 9));
+}
+
+/*
+* Retrieve positions's sell quantity.
+*/
+function getPositionSellQuantity(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 10));
+}
+
+/*
+* Retrieve positions's net quantity.
+*/
+function getPositionNetQuantity(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 11));
+}
+
+/*
+* Retrieve positions's buy value.
+*/
+function getPositionBuyValue(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 12));
+}
+
+/*
+* Retrieve positions's sell value.
+*/
+function getPositionSellValue(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 13));
+}
+
+/*
+* Retrieve positions's net value.
+*/
+function getPositionNetValue(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 14));
+}
+
+/*
+* Retrieve positions's buy average price.
+*/
+function getPositionBuyAvgPrice(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 15));
+}
+
+/*
+* Retrieve positions's sell average price.
+*/
+function getPositionSellAvgPrice(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 16));
+}
+
+/*
+* Retrieve positions's realised pnl.
+*/
+function getPositionRealisedPnl(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 17));
+}
+
+/*
+* Retrieve positions's unrealised pnl.
+*/
+function getPositionUnrealisedPnl(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 18));
+}
+
+/*
+* Retrieve positions's overnight quantity.
+*/
+function getPositionOvernightQuantity(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 19));
+}
+
+/*
+* Retrieve positions's multiplier.
+*/
+function getPositionMultiplier(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 20));
+}
+
+/*
+* Retrieve positions's LTP.
+*/
+function getPositionLtp(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return StrToNum(readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 21));
+}
+
+/*
+* Retrieve positions's (platform specific) exchange.
+*/
+function getPositionExchange(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 22);
+}
+
+/*
+* Retrieve positions's (platform specific) symbol.
+*/
+function getPositionSymbol(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 23);
+}
+
+/*
+* Retrieve positions's date (DD-MM-YYYY).
+*/
+function getPositionDay(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 24);
+}
+
+/*
+* Retrieve positions's trading platform.
+*/
+function getPositionPlatform(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 25);
+}
+
+/*
+* Retrieve positions's account id as received from trading platform.
+*/
+function getPositionAccountId(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 26);
+}
+
+/*
+* Retrieve positions's stock broker.
+*/
+function getPositionStockBroker(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 28);
+}
+
+/*
+* Retrieve positions's state (OPEN, CLOSED).
+*/
+function getPositionState(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 29);
+}
+
+/*
+* Retrieve positions's direction (LONG, SHORT, NEUTRAL).
+*/
+function getPositionDirection(pseudoAccount, category, type, 
+	independentExchange, independentSymbol) {
+	return readPositionColumn(pseudoAccount, 
+		category, type, independentExchange,	independentSymbol, 30);
+}
+
+/*****************************************************************************/
+/*********************** POSITION DETAIL FUNCTIONS - END **********************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/*********************** MARGIN DETAIL FUNCTIONS - START **********************/
+/*****************************************************************************/
+
+/*
+* Retrieve margin funds.
+*/
+function getMarginFunds(pseudoAccount, category) {
+	return StrToNum(readMarginColumn(pseudoAccount, category, 4));
+}
+
+/*
+* Retrieve margin utilized.
+*/
+function getMarginUtilized(pseudoAccount, category) {
+	return StrToNum(readMarginColumn(pseudoAccount, category, 5));
+}
+
+/*
+* Retrieve margin available.
+*/
+function getMarginAvailable(pseudoAccount, category) {
+	return StrToNum(readMarginColumn(pseudoAccount, category, 6));
+}
+
+/*
+* Retrieve margin funds for equity category.
+*/
+function getMarginFundsEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 4));
+}
+
+/*
+* Retrieve margin utilized for equity category.
+*/
+function getMarginUtilizedEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 5));
+}
+
+/*
+* Retrieve margin available for equity category.
+*/
+function getMarginAvailableEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 6));
+}
+
+/*
+* Retrieve margin funds for commodity category.
+*/
+function getMarginFundsCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 4));
+}
+
+/*
+* Retrieve margin utilized for commodity category.
+*/
+function getMarginUtilizedCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 5));
+}
+
+/*
+* Retrieve margin available for commodity category.
+*/
+function getMarginAvailableCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 6));
+}
+
+/*
+* Retrieve margin funds for entire account.
+*/
+function getMarginFundsAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 4));
+}
+
+/*
+* Retrieve margin utilized for entire account.
+*/
+function getMarginUtilizedAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 5));
+}
+
+/*
+* Retrieve margin available for entire account.
+*/
+function getMarginAvailableAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 6));
+}
+
+/*
+* Retrieve margin total for equity category.
+*/
+function getMarginTotalEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 9));
+}
+
+/*
+* Retrieve margin total for commodity category.
+*/
+function getMarginTotalCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 9));
+}
+
+/*
+* Retrieve margin total for entire account.
+*/
+function getMarginTotalAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 9));
+}
+
+/*
+* Retrieve margin net for equity category.
+*/
+function getMarginNetEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 10));
+}
+
+/*
+* Retrieve margin net for commodity category.
+*/
+function getMarginNetCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 10));
+}
+
+/*
+* Retrieve margin net for entire account.
+*/
+function getMarginNetAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 10));
+}
+
+/*
+* Retrieve margin span for equity category.
+*/
+function getMarginSpanEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 11));
+}
+
+/*
+* Retrieve margin span for commodity category.
+*/
+function getMarginSpanCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 11));
+}
+
+/*
+* Retrieve margin span for entire account.
+*/
+function getMarginSpanAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 11));
+}
+
+/*
+* Retrieve margin exposure for equity category.
+*/
+function getMarginExposureEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 12));
+}
+
+/*
+* Retrieve margin exposure for commodity category.
+*/
+function getMarginExposureCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 12));
+}
+
+/*
+* Retrieve margin exposure for entire account.
+*/
+function getMarginExposureAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 12));
+}
+
+/*
+* Retrieve margin collateral for equity category.
+*/
+function getMarginCollateralEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 13));
+}
+
+/*
+* Retrieve margin collateral for commodity category.
+*/
+function getMarginCollateralCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 13));
+}
+
+/*
+* Retrieve margin collateral for entire account.
+*/
+function getMarginCollateralAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 13));
+}
+
+/*
+* Retrieve margin payin for equity category.
+*/
+function getMarginPayinEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 14));
+}
+
+/*
+* Retrieve margin payin for commodity category.
+*/
+function getMarginPayinCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 14));
+}
+
+/*
+* Retrieve margin payin for entire account.
+*/
+function getMarginPayinAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 14));
+}
+
+/*
+* Retrieve margin payout for equity category.
+*/
+function getMarginPayoutEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 15));
+}
+
+/*
+* Retrieve margin payout for commodity category.
+*/
+function getMarginPayoutCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 15));
+}
+
+/*
+* Retrieve margin payout for entire account.
+*/
+function getMarginPayoutAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 15));
+}
+
+/*
+* Retrieve margin adhoc for equity category.
+*/
+function getMarginAdhocEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 16));
+}
+
+/*
+* Retrieve margin adhoc for commodity category.
+*/
+function getMarginAdhocCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 16));
+}
+
+/*
+* Retrieve margin adhoc for entire account.
+*/
+function getMarginAdhocAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 16));
+}
+
+/*
+* Retrieve margin realised mtm for equity category.
+*/
+function getMarginRealisedMtmEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 17));
+}
+
+/*
+* Retrieve margin realised mtm for commodity category.
+*/
+function getMarginRealisedMtmCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 17));
+}
+
+/*
+* Retrieve margin realised mtm for entire account.
+*/
+function getMarginRealisedMtmAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 17));
+}
+
+/*
+* Retrieve margin unrealised mtm for equity category.
+*/
+function getMarginUnrealisedMtmEquity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_EQUITY, 18));
+}
+
+/*
+* Retrieve margin unrealised mtm for commodity category.
+*/
+function getMarginUnrealisedMtmCommodity(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_COMMODITY, 18));
+}
+
+/*
+* Retrieve margin unrealised mtm for entire account.
+*/
+function getMarginUnrealisedMtmAll(pseudoAccount) {
+	return StrToNum(readMarginColumn(pseudoAccount, AT_MARGIN_ALL, 18));
+}
+
+/*****************************************************************************/
+/************************ MARGIN DETAIL FUNCTIONS - END ***********************/
+/*****************************************************************************/
+
+
+/*****************************************************************************/
+/*********************** HOLDING DETAIL FUNCTIONS - START *********************/
+/*****************************************************************************/
+
+/*
+* Retrieve holding exchange.
+*/
+function getHoldingExchange(pseudoAccount, symbol) {
+	return readHoldingColumn(pseudoAccount, symbol, 4);
+}
+
+/*
+* Retrieve holding ISIN.
+*/
+function getHoldingIsin(pseudoAccount, symbol) {
+	return readHoldingColumn(pseudoAccount, symbol, 6);
+}
+
+/*
+* Retrieve holding quantity.
+*/
+function getHoldingQuantity(pseudoAccount, symbol) {
+	return StrToNum(readHoldingColumn(pseudoAccount, symbol, 7));
+}
+
+/*
+* Retrieve holding T1 quantity.
+*/
+function getHoldingT1Quantity(pseudoAccount, symbol) {
+	return StrToNum(readHoldingColumn(pseudoAccount, symbol, 8));
+}
+
+/*
+* Retrieve holding PNL.
+*/
+function getHoldingPnl(pseudoAccount, symbol) {
+	return StrToNum(readHoldingColumn(pseudoAccount, symbol, 9));
+}
+
+/*
+* Retrieve holding product.
+*/
+function getHoldingProduct(pseudoAccount, symbol) {
+	return readHoldingColumn(pseudoAccount, symbol, 10);
+}
+
+/*
+* Retrieve holding collateral type.
+*/
+function getHoldingCollateralType(pseudoAccount, symbol) {
+	return readHoldingColumn(pseudoAccount, symbol, 11);
+}
+
+/*
+* Retrieve holding collateral quantity.
+*/
+function getHoldingCollateralQuantity(pseudoAccount, symbol) {
+	return StrToNum(readHoldingColumn(pseudoAccount, symbol, 12));
+}
+
+/*
+* Retrieve holding haircut.
+*/
+function getHoldingHaircut(pseudoAccount, symbol) {
+	return StrToNum(readHoldingColumn(pseudoAccount, symbol, 13));
+}
+
+/*
+* Retrieve holding average price.
+*/
+function getHoldingAvgPrice(pseudoAccount, symbol) {
+	return StrToNum(readHoldingColumn(pseudoAccount, symbol, 14));
+}
+
+/*
+* Retrieve holding instrument token.
+*/
+function getHoldingInstToken(pseudoAccount, symbol) {
+	return readHoldingColumn(pseudoAccount, symbol, 15);
+}
+
+/*
+* Retrieve holding symbol LTP.
+*/
+function getHoldingLtp(pseudoAccount, symbol) {
+	return readHoldingColumn(pseudoAccount, symbol, 21);
+}
+
+/*
+* Retrieve holding current value.
+*/
+function getHoldingCurrentValue(pseudoAccount, symbol) {
+	return readHoldingColumn(pseudoAccount, symbol, 22);
+}
+
+/*****************************************************************************/
+/************************ HOLDING DETAIL FUNCTIONS - END **********************/
+/*****************************************************************************/

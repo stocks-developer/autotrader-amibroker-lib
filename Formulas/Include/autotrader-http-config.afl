@@ -1,0 +1,75 @@
+/******************************************************************************
+*
+* AutoTrader Web -- settings for the direct (HTTP) library.
+*
+* THIS IS THE ONLY FILE YOU EDIT. Put your API key in it, save, and refresh
+* your charts.
+*
+* Get your API key from your account settings:
+*   https://webx.stocksdeveloper.in/
+*
+* Version: 1.0
+*
+******************************************************************************/
+
+/******************************************************************************
+* YOUR API KEY.
+*
+* Treat it like a password. Anyone holding it can place orders in your
+* accounts. Do not share an AFL file that still has your key in it, and do not
+* post it on a forum when asking for help.
+******************************************************************************/
+
+AT_API_KEY = "<API_KEY>";
+
+/******************************************************************************
+* Where the requests go. Leave this alone unless support asks you to change it.
+******************************************************************************/
+
+AT_BASE_URL = "https://api.stocksdeveloper.in";
+
+/******************************************************************************
+* How long the library re-uses portfolio data before asking the server again,
+* in seconds.
+*
+* Your strategy may call twenty different get...() functions on every bar. Each
+* one is answered from the copy held here, so a bar costs one request per
+* dataset instead of twenty.
+*
+* Lowering these does NOT get you fresher data. The server allows roughly one
+* portfolio request per second per account and answers anything faster than
+* that from its own copy, so a smaller number here buys extra requests and the
+* same numbers. Raise them if you trade slowly and want less traffic.
+*
+* Holdings barely move during the day, which is why they are refreshed rarely.
+******************************************************************************/
+
+AT_TTL_ORDERS = 2;
+
+AT_TTL_POSITIONS = 2;
+
+AT_TTL_MARGINS = 30;
+
+AT_TTL_HOLDINGS = 300;
+
+/******************************************************************************
+* Safety limit on how many rows one dataset may hold. A portfolio never comes
+* close to this; it exists so a malformed reply can never spin a chart.
+******************************************************************************/
+
+AT_HTTP_MAX_ROWS = 2000;
+
+/******************************************************************************
+* Seconds before the library assumes a refresh that never finished is dead and
+* lets another chart try. Only reached when a chart is stopped mid-request.
+******************************************************************************/
+
+AT_HTTP_LOCK_TIMEOUT = 60;
+
+/******************************************************************************
+* Print every request and reply to AmiBroker's trace window.
+*
+* Useful when setting up, noisy afterwards. It does NOT print your API key.
+******************************************************************************/
+
+AT_HTTP_DEBUG = False;

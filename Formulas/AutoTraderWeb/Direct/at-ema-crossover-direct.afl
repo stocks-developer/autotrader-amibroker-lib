@@ -1,0 +1,200 @@
+/**
+* AmiBroker moving average crossover that trades WITHOUT the Desktop Client.
+* You need to set appropriate values in chart parameters.
+*
+* This is the same strategy as at-ema-crossover.afl, with one line changed --
+* the include -- plus the extra handling that becomes possible once orders are
+* sent directly: the broker answers straight away, so the strategy knows the
+* order id and can act on the outcome on the very same bar.
+*
+* BEFORE YOU RUN IT: open Formulas\Include\autotrader-http-config.afl and put
+* your API key in it. Get the key from your account settings at
+* https://webx.stocksdeveloper.in/
+*
+* Needs AmiBroker 6.30 or newer.
+*
+* User Guide: https://stocksdeveloper.in/documentation/index/
+* API Docs: https://stocksdeveloper.in/documentation/api/
+* Symbol Search: https://stocksdeveloper.in:9013/instrument
+*
+* Author - Stocks Developer
+*/
+
+/********************************************************************
+* SECTION 1 - BEGIN
+* This section contains all includes & should be at the top of your strategy afl.
+********************************************************************/
+
+/*
+* The ONLY difference from the bridge version. Everything below uses the same
+* function names as before.
+*/
+#include <autotrader-http.afl>
+
+#include <autotrader-square-off.afl>
+#include <autotrader-next-bar.afl>
+
+/********************************************************************
+* SECTION 1 - END
+********************************************************************/
+
+
+/*******************************************************************
+* How to see strategy logs in AmiBroker?
+* 1. Enable log window from amibroker menu (Window -> Log)
+* 2. You will see log window at the bottom.
+* 3. Go to "Trace" tab (all strategy logs are printed here).
+********************************************************************/
+
+
+/********************************************************************
+* SECTION 2 - BEGIN
+* This section contains your strategy afl code.
+********************************************************************/
+
+_SECTION_BEGIN("Moving Average");
+
+// Moving Average
+SHORT_MA_PERIOD = Param("Short term moving average period", 20, 1, 200, 2);
+LONG_MA_PERIOD = Param("Long term moving average period", 40, 1, 200, 2);
+
+// Refresh even when minimized, see below link
+// https://forum.amibroker.com/t/program-pauses-when-amibroker-minimized/4145/2
+RefreshPeriod = Param( "Timed Refresh Period", 5, 1, 300);
+RequestTimedRefresh(RefreshPeriod, False);
+
+/* Exponential Moving averages */
+EMA1 = EMA( C, SHORT_MA_PERIOD);
+EMA2 = EMA( C, LONG_MA_PERIOD);
+
+/* Buy and Sell Condition */
+Buy = Cross(EMA1,EMA2);
+Sell = Cross(EMA2,EMA1);
+
+/* Remove excess signals */
+Buy = ExRem(Buy,Sell);
+Sell = ExRem(Sell,Buy);
+
+// This is only added for backtesting
+Short=Sell;
+Cover=Buy;
+
+/* We use live prices here, as ValueWhen function gives negative price sometimes */
+buyPrice = LastValue(C);
+sellPrice = LastValue(C);
+
+/* Plot Buy and Sell Signal Arrows */
+shape = Buy * shapeUpArrow + Sell * shapeDownArrow;
+PlotShapes( shape, IIf( Buy, colorGreen, colorRed ), 0, IIf( Buy, Low, High ) );
+GraphXSpace = 5;
+
+/* Plot EMA lines and Candles */
+Plot(EMA1,"EMA", colorRed);
+Plot(EMA2,"EMA2", colorGreen);
+Plot(C, "Close", colorRed, styleCandle);
+
+_SECTION_END();
+
+/********************************************************************
+* SECTION 2 - END
+********************************************************************/
+
+
+/********************************************************************
+* SECTION 3 - BEGIN
+* This section contains your code for placing orders.
+********************************************************************/
+
+/*
+* Handles whatever came back from a place...Order() call.
+*
+* There are THREE outcomes now, not two, and the middle one is the reason this
+* function exists:
+*
+*   an order id  the broker accepted it. You can ask about it straight away.
+*   UNCONFIRMED  it reached the broker and nobody confirmed it. It MAY BE LIVE.
+*                Never send it again -- look at your order book.
+*   blank        it was not placed. Safe to try again later.
+*/
+procedure handleOrderResult(orderId, what) {
+	if(isOrderUnconfirmed(orderId)) {
+		message = "*** " + what + " WAS NOT CONFIRMED. It may be live at your " +
+			"broker. Check your order book before trading this symbol again.";
+		logError(message);
+		_TRACE(message);
+
+	} else if(orderId == "") {
+		message = what + " was not placed.";
+		logError(message);
+		_TRACE(message);
+
+	} else {
+		/*
+		* orderId is the BROKER's order id -- the same one you see in your
+		* broker's order book. Reading it back costs nothing extra: the reply
+		* is held for a couple of seconds and shared by every chart.
+		*/
+		_TRACE(what + " placed. Order id: " + orderId +
+			", status: " + getOrderStatus(AT_ACCOUNT, orderId) +
+			", filled: " + getOrderFilledQuantity(AT_ACCOUNT, orderId));
+	}
+}
+
+/*
+* shouldSquareOff() returns True, when current time goes beyond square off time.
+*/
+if(shouldSquareOff()) {
+	if(!isSquareOffRequestSent()) {
+		// Square off position, as current time has gone passed square off time
+		// Assuming the position is MIS
+		squareOffPosition(AT_ACCOUNT, "DAY", "MIS", AT_EXCHANGE, AT_SYMBOL);
+
+		saveStaticVariable(AT_ACCOUNT, AT_SQUARE_OFF_STATUS_KEY, 1);
+	}
+}
+else {
+
+	BuySignal = Buy;
+	SellSignal = Sell;
+
+	if(AT_PLACE_ORDER_ON_NEXT_BAR) {
+		// Use signals from previous bar (when place order on next bar is turned on)
+		BuySignal = Ref(Buy, -1);
+		SellSignal = Ref(Sell, -1);
+	}
+
+	/*
+	* If control reaches here, it means we are before square off time,
+	* so we can place orders.
+	*/
+	if ( LastValue(BuySignal) == True && isNewBar() )
+	{
+		/*
+		* We double the quantity for all orders except the first, so that a
+		* position can be reversed in one order. Following this approach we can
+		* avoid using Short & Cover.
+		*/
+		quantity = calcDoubleQuantity(AT_ACCOUNT, AT_SYMBOL, AT_QUANTITY);
+
+		orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "BUY",
+			AT_ORDER_MARKET, AT_PRODUCT_TYPE, quantity, buyPrice,
+			defaultTriggerPrice(), True);
+
+		handleOrderResult(orderId, "BUY order");
+	}
+
+	if ( LastValue(SellSignal) == True && isNewBar() )
+	{
+		quantity = calcDoubleQuantity(AT_ACCOUNT, AT_SYMBOL, AT_QUANTITY);
+
+		orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "SELL",
+			AT_ORDER_MARKET, AT_PRODUCT_TYPE, quantity, sellPrice,
+			defaultTriggerPrice(), True);
+
+		handleOrderResult(orderId, "SELL order");
+	}
+}
+
+/********************************************************************
+* SECTION 3 - END
+********************************************************************/

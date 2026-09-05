@@ -1,0 +1,683 @@
+/******************************************************************************
+*
+* AutoTrader Web -- HTTP transport for the direct library.
+* DO NOT MODIFY THIS FILE
+* Version: 1.0
+*
+* Everything that talks to the network lives here. The functions above it in
+* autotrader-http-api.afl never call AmiBroker's Internet functions directly,
+* so there is exactly one place where a request is built, sent, judged and
+* remembered.
+*
+******************************************************************************/
+
+/**
+* Needs AmiBroker 6.30 or newer.
+*
+* 6.30 is the floor because of what it does NOT have: no JSON parser (that
+* arrived with 6.40) and no way to set a request header from AFL. Both are
+* designed around -- the server answers this library in CSV and one-line text,
+* and the API key travels as a POST form field.
+*/
+Version(6.30);
+
+/******************************* CONSTANTS ***********************************/
+
+/*
+* How a reply is classified. Every response falls into exactly one of these,
+* decided on the first few characters -- see atClassify() for why that is
+* enough to tell them apart.
+*/
+AT_HTTP_CSV = "CSV";
+AT_HTTP_EMPTY = "EMPTY";
+AT_HTTP_OK = "OK";
+AT_HTTP_ERROR = "ERROR";
+AT_HTTP_AUTH = "AUTH";
+AT_HTTP_UNREACHABLE = "UNREACHABLE";
+
+/* What the server says to do about a failure. */
+AT_ACTION_RETRY = "retry";
+AT_ACTION_USER = "user";
+AT_ACTION_CHECK = "check";
+
+/*
+* Returned by placeOrder() when the order reached the broker and the broker
+* never confirmed it. It is deliberately NOT blank: a strategy that reads blank
+* as failure would place the order a second time, and there is real money on
+* the other side of that. See the note on placeOrder().
+*/
+AT_UNCONFIRMED = "UNCONFIRMED";
+
+/* First field of every structured reply. */
+AT_SD_ERROR = "SD-ERROR";
+AT_SD_OK = "SD-OK";
+
+/*
+* First column of every portfolio CSV we serve, and the positive test for "this
+* is data". Orders, positions, margins and holdings all begin their header row
+* with it, and no error reply can: an error starts with SD-, an authentication
+* failure with a brace, a gateway page with an angle bracket.
+*/
+AT_CSV_HEADER = "PSEUDOACCOUNT";
+
+/*
+* Command verbs that address an order by the BROKER's order id.
+*
+* Defined here rather than beside the others in autotrader-defaults.afl because
+* only a direct client can use them: they exist for a client that has no
+* publisher id to give, which is exactly what this transport is. The file based
+* library keeps AT_MODIFY_ORDER_CMD and friends, untouched.
+*/
+AT_MODIFY_ORDER_BY_ID_CMD = "MODIFY_ORDER_BY_ID";
+AT_CANCEL_ORDER_BY_ID_CMD = "CANCEL_ORDER_BY_ID";
+AT_CANCEL_CHILD_ORDER_BY_ID_CMD = "CANCEL_CHILD_ORDER_BY_ID";
+
+/* Dataset names. These are the paths under /csv as well. */
+AT_DS_ORDERS = "orders";
+AT_DS_POSITIONS = "positions";
+AT_DS_MARGINS = "margins";
+AT_DS_HOLDINGS = "holdings";
+
+/* Prefix for every static variable this file owns. */
+AT_HTTP_CACHE_PREFIX = "ATHTTP";
+
+AT_HTTP_HEX = "0123456789ABCDEF";
+
+/*
+* Set by atHttpPost(): False when the request never left the machine at all.
+*
+* Needed because an unreachable server and an account with no orders both hand
+* back an empty string, and treating a dead connection as "you have no orders"
+* is how a strategy ends up trading on the belief that its position is flat.
+*/
+global atHttpReached;
+atHttpReached = False;
+
+/* Details of the last failure, for the caller to log or show. */
+global atHttpMessage;
+atHttpMessage = "";
+
+global atHttpAction;
+atHttpAction = "";
+
+/******************************* PLUMBING ************************************/
+
+procedure atHttpTrace(message) {
+	if(AT_HTTP_DEBUG) {
+		_TRACE("AutoTrader: " + message);
+	}
+}
+
+/**
+* Percent-encodes a value for a form body.
+*
+* Not optional. Symbols legitimately contain characters that would otherwise
+* end the field or start a new one -- M&M is a real NSE symbol, and an
+* unencoded ampersand there would silently truncate the order.
+*
+* Hex is assembled from a lookup string rather than StrFormat so it behaves the
+* same on every build.
+*/
+function atUrlEncode(text) {
+	result = "";
+	total = StrLen(text);
+
+	for(i = 0; i < total; i++) {
+		c = StrMid(text, i, 1);
+		code = Asc(c);
+
+		if((code >= 48 AND code <= 57) OR (code >= 65 AND code <= 90) OR
+			(code >= 97 AND code <= 122) OR c == "-" OR c == "_" OR
+			c == "." OR c == "~") {
+			result = result + c;
+		} else {
+			result = result + "%" +
+				StrMid(AT_HTTP_HEX, int(code / 16), 1) +
+				StrMid(AT_HTTP_HEX, code % 16, 1);
+		}
+	}
+
+	return result;
+}
+
+/**
+* Returns the n-th pipe separated field of a structured reply, 1 based.
+*
+* Written out rather than using StrExtract because StrExtract splits on commas,
+* and the message field of an error routinely contains commas ("RMS: margin
+* shortfall, order rejected"). The server guarantees the reverse -- it replaces
+* any pipe inside a message -- so splitting on the pipe is always safe.
+*/
+function atPipeField(line, index) {
+	rest = line;
+	result = "";
+
+	for(i = 1; i <= index; i++) {
+		position = StrFind(rest, "|");
+
+		if(i == index) {
+			if(position > 0) {
+				result = StrMid(rest, 0, position - 1);
+			} else {
+				result = rest;
+			}
+		} else {
+			if(position > 0) {
+				rest = StrMid(rest, position);
+			} else {
+				/* Asked for a field past the end of the line. */
+				rest = "";
+			}
+		}
+	}
+
+	return result;
+}
+
+/**
+* Sends a POST and returns the whole response body.
+*
+* The body is all AFL ever sees. InternetReadString hands back text and nothing
+* else -- no status code, no headers -- which is why the server states every
+* outcome inside the body.
+*/
+function atHttpPost(path, postBody) {
+	global atHttpReached;
+
+	url = AT_BASE_URL + path;
+	response = "";
+	atHttpReached = False;
+
+	handle = InternetPostRequest(url, postBody);
+
+	if(handle) {
+		atHttpReached = True;
+
+		/*
+		* Read to the end rather than assuming one call returns one line. The
+		* body is split into rows afterwards, by us, so this works whether the
+		* reply arrives a line or a block at a time.
+		*/
+		for(i = 0; i < AT_HTTP_MAX_ROWS; i++) {
+			chunk = InternetReadString(handle);
+			if(chunk == "") {
+				break;
+			}
+			response = response + chunk;
+		}
+
+		InternetClose(handle);
+	}
+
+	return response;
+}
+
+/**
+* Decides what kind of reply this is, by positive identification.
+*
+* Order matters, and so does what counts as empty. A blank body is a dataset
+* with no rows -- an account with no orders has always produced an empty file,
+* and the server writes no header when there is nothing to write. It is NOT a
+* valid answer to a command: every command is answered SD-OK or SD-ERROR, so a
+* blank reply to one means the answer was lost on the way back, and the order
+* may well have been placed.
+*
+* That is why isCommand decides the tail of this. For a read, anything
+* unrecognised is a transport problem worth retrying. For a command it is the
+* one case that must never be retried automatically.
+*/
+function atClassify(response, isCommand) {
+	if(!atHttpReached) {
+		result = AT_HTTP_UNREACHABLE;
+	} else if(strStartsWith(response, AT_SD_ERROR)) {
+		result = AT_HTTP_ERROR;
+	} else if(strStartsWith(response, AT_SD_OK)) {
+		result = AT_HTTP_OK;
+	} else if(strStartsWith(response, "{")) {
+		/*
+		* Authentication failed before any of our code ran. The key is wrong or
+		* missing, and sending the same key again cannot help.
+		*/
+		result = AT_HTTP_AUTH;
+	} else if(isCommand) {
+		/* Nothing else is a valid reply to a command, blank included. */
+		result = AT_HTTP_UNREACHABLE;
+	} else if(strIsEmpty(response)) {
+		result = AT_HTTP_EMPTY;
+	} else if(strStartsWith(response, AT_CSV_HEADER)) {
+		result = AT_HTTP_CSV;
+	} else {
+		result = AT_HTTP_UNREACHABLE;
+	}
+
+	return result;
+}
+
+/**
+* Pulls the code, action and message out of an SD-ERROR line and remembers them.
+*/
+procedure atRecordError(response) {
+	global atHttpMessage;
+	global atHttpAction;
+
+	atHttpAction = atPipeField(response, 3);
+	atHttpMessage = atPipeField(response, 4);
+
+	if(atHttpMessage == "") {
+		atHttpMessage = response;
+	}
+}
+
+/**
+* Turns a classification into the message a user should see, and remembers the
+* action so a caller can tell "try later" from "fix something".
+*
+* The one judgement here is what an unreachable server means, and it is not the
+* same for the two kinds of request. A read that did not arrive can simply be
+* asked for again. A command that did not arrive may in fact have arrived, with
+* only the answer lost -- so it is CHECK, and the caller must not resend it.
+*/
+procedure atRecordStatus(status, response, isCommand) {
+	global atHttpMessage;
+	global atHttpAction;
+
+	if(status == AT_HTTP_ERROR) {
+		atRecordError(response);
+	} else if(status == AT_HTTP_AUTH) {
+		atHttpAction = AT_ACTION_USER;
+		atHttpMessage = "API key was not accepted. Check AT_API_KEY in autotrader-http-config.afl.";
+	} else if(status == AT_HTTP_UNREACHABLE) {
+		if(isCommand) {
+			atHttpAction = AT_ACTION_CHECK;
+			atHttpMessage = "No usable reply from " + AT_BASE_URL +
+				". The request may still have gone through -- check your order book.";
+		} else {
+			atHttpAction = AT_ACTION_RETRY;
+			atHttpMessage = "Could not reach " + AT_BASE_URL + ". Check the internet connection.";
+		}
+	} else {
+		atHttpAction = "";
+		atHttpMessage = "";
+	}
+}
+
+/******************************** THE CACHE **********************************/
+
+/*
+* Portfolio data is held in static variables, one per row.
+*
+* Two reasons, and the second is the one that matters. A strategy calling
+* twenty get...() functions on a bar would otherwise make twenty requests for
+* the same four datasets; and the server allows about one portfolio request per
+* second per account, so a chart doing that would spend its whole allowance
+* re-asking for data it already had.
+*
+* The keys are deliberately NOT chart specific. Static variables are shared
+* across the whole of AmiBroker, so ten charts trading one account share one
+* copy and one request, rather than ten.
+*/
+
+function atCacheKey(pseudoAccount, dataset, suffix) {
+	return AT_HTTP_CACHE_PREFIX + "|" + dataset + "|" + pseudoAccount + "|" + suffix;
+}
+
+function atRowKey(pseudoAccount, dataset, row) {
+	return atCacheKey(pseudoAccount, dataset, "R" + NumToStr(row, 1.0, False));
+}
+
+function atTtlFor(dataset) {
+	if(dataset == AT_DS_ORDERS) {
+		ttl = AT_TTL_ORDERS;
+	} else if(dataset == AT_DS_POSITIONS) {
+		ttl = AT_TTL_POSITIONS;
+	} else if(dataset == AT_DS_MARGINS) {
+		ttl = AT_TTL_MARGINS;
+	} else {
+		ttl = AT_TTL_HOLDINGS;
+	}
+
+	return ttl;
+}
+
+/**
+* Splits a CSV body into rows and stores them, returning how many were kept.
+*
+* The header row is dropped, so row 1 is the first real record and the column
+* numbers used by the get...() functions match the file based library exactly.
+*
+* Splitting happens here rather than while reading so that the result does not
+* depend on how the response was chunked on the way in.
+*/
+function atStoreRows(pseudoAccount, dataset, body) {
+	rows = 0;
+
+	/* Carriage returns removed once, so no row can end with a stray one. */
+	rest = StrReplace(body, "\r", "");
+
+	for(i = 0; i < AT_HTTP_MAX_ROWS; i++) {
+		position = StrFind(rest, "\n");
+
+		if(position > 0) {
+			line = StrMid(rest, 0, position - 1);
+			rest = StrMid(rest, position);
+		} else {
+			line = rest;
+			rest = "";
+		}
+
+		/* i == 0 is the header row. */
+		if(i > 0 AND line != "") {
+			rows++;
+			StaticVarSetText(atRowKey(pseudoAccount, dataset, rows), line);
+		}
+
+		if(rest == "") {
+			break;
+		}
+	}
+
+	return rows;
+}
+
+/**
+* Forgets rows left over from a longer previous reply.
+*
+* Nothing reads past the stored count, so this is housekeeping rather than
+* correctness -- but a portfolio that shrinks from 300 rows to 3 would
+* otherwise leave 297 strings behind for the rest of the session.
+*/
+procedure atDropRows(pseudoAccount, dataset, fromRow, toRow) {
+	for(i = fromRow; i <= toRow; i++) {
+		StaticVarRemove(atRowKey(pseudoAccount, dataset, i));
+	}
+}
+
+/**
+* Asks the server for one dataset and replaces what is cached for it.
+*
+* On any failure the previous rows are LEFT ALONE and only the status changes.
+* A strategy mid-position should not suddenly see an empty order book because
+* one request timed out; the caller decides what to do about the status.
+*/
+function atFetchDataset(pseudoAccount, dataset) {
+	postBody = "api-key=" + atUrlEncode(AT_API_KEY) +
+		"&pseudoAccount=" + atUrlEncode(pseudoAccount);
+
+	atHttpTrace("reading " + dataset + " for " + pseudoAccount);
+
+	response = atHttpPost("/csv/" + dataset, postBody);
+	status = atClassify(response, False);
+	atRecordStatus(status, response, False);
+
+	countKey = atCacheKey(pseudoAccount, dataset, "N");
+	previous = Nz(StaticVarGet(countKey));
+
+	if(status == AT_HTTP_CSV) {
+		rows = atStoreRows(pseudoAccount, dataset, response);
+		StaticVarSet(countKey, rows);
+
+		if(previous > rows) {
+			atDropRows(pseudoAccount, dataset, rows + 1, previous);
+		}
+
+		atHttpTrace(dataset + ": " + NumToStr(rows, 1.0, False) + " rows");
+
+	} else if(status == AT_HTTP_EMPTY) {
+		/* A real answer: this account has nothing in this dataset right now. */
+		StaticVarSet(countKey, 0);
+		atDropRows(pseudoAccount, dataset, 1, previous);
+
+		atHttpTrace(dataset + ": empty");
+
+	} else {
+		message = "SD-ERR-AB-READ: " + dataset + " for " + pseudoAccount +
+			" failed [" + status + "] " + atHttpMessage;
+		logError(message);
+		_TRACE(message);
+	}
+
+	StaticVarSetText(atCacheKey(pseudoAccount, dataset, "ST"), status);
+
+	return status;
+}
+
+/**
+* Makes sure the cached copy of a dataset is recent enough to use.
+*
+* The timestamp is written whatever the outcome, including failures. Without
+* that, a chart that cannot reach the server would retry on every single
+* get...() call -- hundreds of hanging requests per bar, at the moment the
+* network is already in trouble.
+*/
+function atEnsureFresh(pseudoAccount, dataset) {
+	timeKey = atCacheKey(pseudoAccount, dataset, "TS");
+	statusKey = atCacheKey(pseudoAccount, dataset, "ST");
+
+	fetchedAt = Nz(StaticVarGet(timeKey));
+
+	if(fetchedAt > 0 AND DateTimeDiff(Now(5), fetchedAt) < atTtlFor(dataset)) {
+		return StaticVarGetText(statusKey);
+	}
+
+	/*
+	* One chart refreshes; the others carry on with what is already cached.
+	*
+	* Deliberately NOT "wait, then fetch anyway". Charts refresh together, and
+	* if every one that lost the race went on to make its own request they
+	* would arrive as a burst -- the exact shape the server's rate limit exists
+	* to absorb, produced by us.
+	*/
+	lockKey = atCacheKey(pseudoAccount, dataset, "LOCK");
+	lockTimeKey = atCacheKey(pseudoAccount, dataset, "LOCKTS");
+
+	heldSince = Nz(StaticVarGet(lockTimeKey));
+
+	if(heldSince > 0) {
+		if(DateTimeDiff(Now(5), heldSince) > AT_HTTP_LOCK_TIMEOUT) {
+			/*
+			* Release a lock nobody is holding any more.
+			*
+			* A static variable outlives the formula that set it, so a chart
+			* stopped or refreshed in the middle of a request never runs its
+			* release. Without this the dataset would be stuck on its last copy
+			* for the rest of the AmiBroker session, silently, and the only
+			* symptom would be numbers that never move.
+			*/
+			StaticVarSet(lockKey, 0);
+			StaticVarSet(lockTimeKey, 0);
+			atHttpTrace("released a stale lock on " + dataset + " for " + pseudoAccount);
+
+		} else {
+			/*
+			* Somebody is fetching this right now. Return immediately with what
+			* we already have -- do NOT queue behind them.
+			*
+			* This branch is why the wait below is almost never reached, and it
+			* has to come first. tryEnterCriticalSection spins for up to a full
+			* second before giving up, and atEnsureFresh runs on EVERY get...()
+			* call: a strategy reading twenty fields while another chart holds
+			* the lock would otherwise stall for twenty seconds, once per bar.
+			*/
+			return StaticVarGetText(statusKey);
+		}
+	}
+
+	/*
+	* Still guarded, for the narrow window between the check above and the
+	* winner stamping its lock time.
+	*/
+	if(!tryEnterCriticalSection(lockKey)) {
+		return StaticVarGetText(statusKey);
+	}
+
+	StaticVarSet(lockTimeKey, Now(5));
+
+	/* Re-check: another chart may have refreshed while we waited for the lock. */
+	fetchedAt = Nz(StaticVarGet(timeKey));
+
+	if(fetchedAt > 0 AND DateTimeDiff(Now(5), fetchedAt) < atTtlFor(dataset)) {
+		StaticVarSet(lockTimeKey, 0);
+		leaveCriticalSection();
+		return StaticVarGetText(statusKey);
+	}
+
+	status = atFetchDataset(pseudoAccount, dataset);
+
+	/*
+	* Stamped on failure too. A chart that cannot reach the server must not
+	* retry on every get...() call -- that is hundreds of hanging requests a
+	* bar, produced exactly when the network is already struggling.
+	*/
+	StaticVarSet(timeKey, Now(5));
+
+	StaticVarSet(lockTimeKey, 0);
+	leaveCriticalSection();
+
+	return status;
+}
+
+/**
+* Reads one column of the row whose key column equals the given value.
+*
+* Same contract as the file based library's fileReadCsvColumnByRowId: columns
+* are numbered from 1, and a row that is not there gives a blank rather than an
+* error, so a strategy asking about an order that has not appeared yet behaves
+* the same as it always has.
+*/
+function atReadColumn(pseudoAccount, dataset, keyValue, keyColumn, column) {
+	atEnsureFresh(pseudoAccount, dataset);
+
+	total = Nz(StaticVarGet(atCacheKey(pseudoAccount, dataset, "N")));
+	result = "";
+
+	for(i = 1; i <= total; i++) {
+		line = StaticVarGetText(atRowKey(pseudoAccount, dataset, i));
+
+		if(keyValue == StrExtract(line, keyColumn - 1)) {
+			result = StrExtract(line, column - 1);
+			break;
+		}
+	}
+
+	return result;
+}
+
+/**
+* The same, for rows identified by four columns at once.
+*
+* A position has no id of its own; it is identified by category, type, exchange
+* and symbol together, which is how at-desktop has always addressed one.
+*/
+function atReadColumn4(pseudoAccount, dataset,
+	value1, column1, value2, column2, value3, column3, value4, column4, column) {
+
+	atEnsureFresh(pseudoAccount, dataset);
+
+	total = Nz(StaticVarGet(atCacheKey(pseudoAccount, dataset, "N")));
+	result = "";
+
+	for(i = 1; i <= total; i++) {
+		line = StaticVarGetText(atRowKey(pseudoAccount, dataset, i));
+
+		if(value1 == StrExtract(line, column1 - 1) AND
+			value2 == StrExtract(line, column2 - 1) AND
+			value3 == StrExtract(line, column3 - 1) AND
+			value4 == StrExtract(line, column4 - 1)) {
+
+			result = StrExtract(line, column - 1);
+			break;
+		}
+	}
+
+	return result;
+}
+
+/**
+* Number of rows currently held for a dataset. Refreshes first.
+*/
+function atRowCount(pseudoAccount, dataset) {
+	atEnsureFresh(pseudoAccount, dataset);
+	return Nz(StaticVarGet(atCacheKey(pseudoAccount, dataset, "N")));
+}
+
+/**
+* Reads a column from a row by its position, 1 for the first record.
+*/
+function atReadRowColumn(pseudoAccount, dataset, row, column) {
+	atEnsureFresh(pseudoAccount, dataset);
+
+	total = Nz(StaticVarGet(atCacheKey(pseudoAccount, dataset, "N")));
+	result = "";
+
+	if(row >= 1 AND row <= total) {
+		result = StrExtract(StaticVarGetText(atRowKey(pseudoAccount, dataset, row)), column - 1);
+	}
+
+	return result;
+}
+
+/******************************** COMMANDS ***********************************/
+
+/**
+* Sends one command and returns how it went, as one of the AT_HTTP_ values.
+*
+* The reply itself is left in atHttpResponse for a caller that needs the order
+* id out of it.
+*/
+global atHttpResponse;
+atHttpResponse = "";
+
+function atSendCommand(csv) {
+	global atHttpResponse;
+
+	postBody = "api-key=" + atUrlEncode(AT_API_KEY) +
+		"&command=" + atUrlEncode(csv);
+
+	atHttpTrace("command: " + csv);
+
+	atHttpResponse = atHttpPost("/csv/command", postBody);
+	status = atClassify(atHttpResponse, True);
+	atRecordStatus(status, atHttpResponse, True);
+
+	atHttpTrace("reply: " + atHttpResponse);
+
+	return status;
+}
+
+/**
+* Runs a command that has nothing to return but success or failure -- modify,
+* cancel, square off. Returns True only if the server confirmed it.
+*
+* Anything else is False AND logged with the reason, because the caller is a
+* strategy that cannot ask a question: if a square-off did not happen, the only
+* way anyone finds out is the log.
+*/
+function atRunCommand(csv, description) {
+	status = atSendCommand(csv);
+
+	if(status == AT_HTTP_OK) {
+		message = description + " done.";
+		logDebug(message);
+		_TRACE(message);
+		return True;
+	}
+
+	message = "SD-ERR-AB-CMD: " + description + " failed [" + status + "] " + atHttpMessage;
+	logError(message);
+	_TRACE(message);
+
+	if(atHttpAction == AT_ACTION_CHECK) {
+		/*
+		* The request reached the broker and was never confirmed. Reporting
+		* False is right -- we did not see it succeed -- but a bare False would
+		* let a strategy quietly assume nothing happened, and something may
+		* well have.
+		*/
+		message = "SD-ERR-AB-CMD: " + description +
+			" may still have gone through. Check your order book before repeating it.";
+		logError(message);
+		_TRACE(message);
+	}
+
+	return False;
+}
