@@ -16,7 +16,7 @@ The **AutoTrader Web AmiBroker library** is an AFL library that lets you place o
 - **Broker independent.** The same strategy trades on any broker AutoTrader Web supports, across 40+ Indian brokers. No broker-specific code.
 - **Single or multi-account.** Send an order to one account or many at once.
 - **Ready-made samples.** Regular / bracket / cover orders, scanners, button trading and multi-account templates included.
-- **Bridge connection.** Your AFL writes order requests locally, and the AutoTrader Desktop Client sends the real instructions on to your broker.
+- **Direct connection.** Your AFL talks to AutoTrader Web over the internet. There is nothing else to install and nothing that has to keep running.
 
 ## What is AutoTrader Web?
 
@@ -50,14 +50,15 @@ AutoTrader Web works with **40+ Indian brokers**:
 
 ## Quick start
 
-AmiBroker is a **bridge** client, so it works together with the AutoTrader Desktop Client running on your computer.
+AmiBroker talks to AutoTrader Web directly. Needs **AmiBroker 6.30 or newer**.
 
-1. Install and start the [AutoTrader Desktop Client](https://stocksdeveloper.in/documentation/client-setup/desktop-client/).
-2. On its **Settings** tab, click **Amibroker Library Install** and select your AmiBroker folder. This copies the AFL library into AmiBroker's `Formulas\Include` folder.
-3. Include the library at the top of your strategy AFL:
+1. Sign in at [webx.stocksdeveloper.in](https://webx.stocksdeveloper.in/) and go to **Tools -> Library**.
+2. Download the AmiBroker library. Your API key is already inside the download, which is why it asks for your password.
+3. Extract the zip into your AmiBroker folder -- the one that holds `Broker.exe`.
+4. Include the library at the top of your strategy AFL:
 
 ```c
-#include <autotrader.afl>
+#include <autotrader-http.afl>
 ```
 
 4. Place an order. The same call works on every supported broker:
@@ -95,7 +96,7 @@ This repository also includes free, open-source AmiBroker AFL utilities under [`
 | 📘 Documentation | https://stocksdeveloper.in/documentation/getting-started/ |
 | 🧩 API reference | https://stocksdeveloper.in/documentation/api/ |
 | ⚙️ AmiBroker library setup | https://stocksdeveloper.in/documentation/client-setup/amibroker-library/ |
-| 🖥️ Desktop Client setup | https://stocksdeveloper.in/documentation/client-setup/desktop-client/ |
+| 🖥️ AmiBroker library setup | https://stocksdeveloper.in/documentation/client-setup/amibroker-library/ |
 | 🆓 Start free (1-month trial) | https://webx.stocksdeveloper.in/register |
 | ✉️ Contact us | https://stocksdeveloper.in/contact/ |
 
