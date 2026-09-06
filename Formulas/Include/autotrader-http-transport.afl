@@ -84,6 +84,16 @@ AT_HTTP_CACHE_PREFIX = "ATHTTP";
 AT_HTTP_HEX = "0123456789ABCDEF";
 
 /*
+* One double quote, as a string.
+*
+* Held here so the backslash escape appears exactly once in the file. AFL takes
+* the same escapes as C, and the library already relies on that for "\\", but a
+* bare quote inside a quoted string is the kind of thing an editor or a careless
+* copy silently breaks -- and it would break the CSV reader below, not fail loudly.
+*/
+AT_HTTP_QUOTE = "\"";
+
+/*
 * Set by atHttpPost(): False when the request never left the machine at all.
 *
 * Needed because an unreachable server and an account with no orders both hand
@@ -169,6 +179,86 @@ function atPipeField(line, index) {
 				rest = "";
 			}
 		}
+	}
+
+	return result;
+}
+
+/**
+* Returns one field of a CSV line, 1 based, honouring quoted fields.
+*
+* StrExtract cannot do this, and that is the entire reason this exists: it
+* splits on EVERY comma. The server quotes any field that contains one, and two
+* fields routinely do -- an order's status message and its comments, which read
+* like "RMS: margin shortfall, order rejected". Splitting blind shifts every
+* column after such a field, so atOrderAveragePrice would hand back a slice of
+* the broker's error text instead of a price. It would do so silently, and only
+* for the orders that failed, which is the worst possible time to be wrong.
+*
+* A doubled quote inside a quoted field is one literal quote; that is how the
+* server escapes a quote appearing in a message. A quote anywhere other than at
+* the start of a field is an ordinary character.
+*
+* The second half of a doubled quote is stepped over with a flag rather than by
+* advancing the loop counter inside the body. Both are ordinary C, but nothing
+* else in this library moves a for() counter from within the loop, and this file
+* cannot be run here to prove that AFL honours it -- so it uses only constructs
+* the rest of the library already relies on.
+*/
+function atCsvField(line, column) {
+	total = StrLen(line);
+	field = 1;
+	quoted = False;
+	value = "";
+	result = "";
+	found = False;
+	skip = False;
+
+	for(i = 0; i < total; i++) {
+		if(skip) {
+			skip = False;
+		} else {
+			c = StrMid(line, i, 1);
+
+			if(quoted) {
+				if(c == AT_HTTP_QUOTE) {
+					if(i < (total - 1) AND StrMid(line, i + 1, 1) == AT_HTTP_QUOTE) {
+						value = value + AT_HTTP_QUOTE;
+						skip = True;
+					} else {
+						quoted = False;
+					}
+				} else {
+					value = value + c;
+				}
+			} else {
+				if(c == AT_HTTP_QUOTE AND StrLen(value) == 0) {
+					quoted = True;
+				} else {
+					if(c == ",") {
+						if(field == column) {
+							result = value;
+							found = True;
+							break;
+						}
+
+						field++;
+						value = "";
+					} else {
+						value = value + c;
+					}
+				}
+			}
+		}
+	}
+
+	/*
+	* The last field on a line has no comma after it, so it is only complete
+	* once the loop ends. Asking for a column past the end gives a blank, which
+	* is what every reader here does for anything it cannot find.
+	*/
+	if(NOT found AND field == column) {
+		result = value;
 	}
 
 	return result;
@@ -553,8 +643,8 @@ function atReadColumn(pseudoAccount, dataset, keyValue, keyColumn, column) {
 	for(i = 1; i <= total; i++) {
 		line = StaticVarGetText(atRowKey(pseudoAccount, dataset, i));
 
-		if(keyValue == StrExtract(line, keyColumn - 1)) {
-			result = StrExtract(line, column - 1);
+		if(keyValue == atCsvField(line, keyColumn)) {
+			result = atCsvField(line, column);
 			break;
 		}
 	}
@@ -579,12 +669,12 @@ function atReadColumn4(pseudoAccount, dataset,
 	for(i = 1; i <= total; i++) {
 		line = StaticVarGetText(atRowKey(pseudoAccount, dataset, i));
 
-		if(value1 == StrExtract(line, column1 - 1) AND
-			value2 == StrExtract(line, column2 - 1) AND
-			value3 == StrExtract(line, column3 - 1) AND
-			value4 == StrExtract(line, column4 - 1)) {
+		if(value1 == atCsvField(line, column1) AND
+			value2 == atCsvField(line, column2) AND
+			value3 == atCsvField(line, column3) AND
+			value4 == atCsvField(line, column4)) {
 
-			result = StrExtract(line, column - 1);
+			result = atCsvField(line, column);
 			break;
 		}
 	}
@@ -610,7 +700,7 @@ function atReadRowColumn(pseudoAccount, dataset, row, column) {
 	result = "";
 
 	if(row >= 1 AND row <= total) {
-		result = StrExtract(StaticVarGetText(atRowKey(pseudoAccount, dataset, row)), column - 1);
+		result = atCsvField(StaticVarGetText(atRowKey(pseudoAccount, dataset, row)), column);
 	}
 
 	return result;
