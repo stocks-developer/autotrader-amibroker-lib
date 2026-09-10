@@ -93,6 +93,20 @@ python tools/check-afl.py
 
 It prints the file and line of anything it finds, and exits with a non-zero code. It needs Python only, not AmiBroker.
 
+**Run it before every push.** All three of the mistakes it looks for stop the whole library from loading, so a single one of them affects every user.
+
+## Running the library in real AmiBroker
+
+`check-afl.py` is fast and needs no AmiBroker, but it is still only a model of AmiBroker. [`tools/amibroker-harness/`](tools/amibroker-harness/) runs the library in the real program and reports whether it actually loads:
+
+```
+powershell -ExecutionPolicy Bypass -File tools/amibroker-harness/run-test.ps1
+```
+
+Use both. `check-afl.py` tells you **where** a problem is, down to the file and line. The harness tells you **whether** AmiBroker will load the library at all, and quotes AmiBroker's own error message when it will not.
+
+See [`tools/amibroker-harness/README.md`](tools/amibroker-harness/README.md) for setup and for the control group that keeps the harness honest.
+
 ## Pricing and free trial
 
 - **Free 1-month trial** on supported brokers, with every feature included.

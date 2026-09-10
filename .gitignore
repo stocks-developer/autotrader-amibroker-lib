@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# Harness run artefacts: generated formula, marker and captured output.
+tools/amibroker-harness/out/
