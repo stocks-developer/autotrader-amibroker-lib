@@ -21,6 +21,18 @@ is caught by any test we can run without AmiBroker installed.
        defined earlier in the file, or in an earlier #include, than the line
        that calls it. Reordering includes is enough to break this.
 
+    3. Return placement.  AmiBroker's own documentation is explicit: "a return
+       statement must be placed at the very end of the function". An early
+       return -- the ordinary C habit of returning from inside an if() -- is:
+
+           Error 30. Syntax error, unexpected RETURN
+
+       This is the second real defect of this kind that shipped: atEnsureFresh()
+       returned early from four branches, and the direct library could not be
+       loaded by anybody until it was rewritten to a single exit. The whole of
+       the file-based library obeys the rule (208 functions, one return each),
+       which is why it never showed up there.
+
 Usage:
     python tools/check-afl.py           # from the repository root
     echo $?                             # 0 = clean, 1 = problems found
@@ -173,11 +185,83 @@ def check_define_before_use(reserved):
     return problems
 
 
+# Braces, function headers and the return keyword, in one pass. Everything else
+# in the file is irrelevant to check 3, and running one regex over the stripped
+# source is what keeps the brace depth honest across `} else {`.
+TOKENS = re.compile(r"[{}]|\b(?:function|procedure)\s+(\w+)\s*\(|\breturn\b", re.I)
+
+
+def check_return_placement():
+    """Check 3, over every .afl in the repository, samples included.
+
+    Depth 0 is file scope, depth 1 is a function body. A return at depth 2 or
+    deeper sits inside an if(), an else or a loop, and will not parse. More than
+    one return in a function cannot all be last, so that is reported too.
+    """
+    problems = []
+    for path in sorted(ROOT.rglob("*.afl")):
+        code = strip_noise(path.read_text(encoding="utf-8", errors="replace"))
+        rel = path.relative_to(ROOT).as_posix()
+
+        newlines = [m.end() for m in re.finditer(r"\n", code)]
+
+        def line_of(offset):
+            lo, hi = 0, len(newlines)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if newlines[mid] <= offset:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            return lo + 1
+
+        depth = 0
+        current = None
+        functions = []
+        for m in TOKENS.finditer(code):
+            token = m.group(0)
+            if token == "{":
+                depth += 1
+            elif token == "}":
+                depth -= 1
+                if depth <= 0:
+                    depth = 0
+                    if current is not None:
+                        functions.append(current)
+                        current = None
+            elif m.group(1) is not None:
+                if depth == 0:
+                    if current is not None:
+                        functions.append(current)
+                    current = {"name": m.group(1), "line": line_of(m.start()),
+                               "returns": []}
+            elif current is not None:
+                current["returns"].append((line_of(m.start()), depth))
+        if current is not None:
+            functions.append(current)
+
+        for fn in functions:
+            nested = [line for line, d in fn["returns"] if d >= 2]
+            if nested:
+                for line in nested:
+                    problems.append(
+                        "%s:%d  'return' inside a nested block in %s() -- AFL needs the "
+                        "return to be the last statement of the function"
+                        % (rel, line, fn["name"]))
+            elif len(fn["returns"]) > 1:
+                where = ", ".join(str(line) for line, _ in fn["returns"])
+                problems.append(
+                    "%s:%d  %s() has %d returns (lines %s) -- AFL allows one, at the "
+                    "very end" % (rel, fn["line"], fn["name"], len(fn["returns"]), where))
+    return problems
+
+
 def main():
     reserved = load_reserved()
     print("checking %s against %d built-in AFL names" % (ROOT.name, len(reserved)))
 
-    problems = check_reserved(reserved) + check_define_before_use(reserved)
+    problems = (check_reserved(reserved) + check_define_before_use(reserved)
+                + check_return_placement())
     print()
     if problems:
         for p in problems:
@@ -186,7 +270,8 @@ def main():
         print("%d problem(s). Each of these stops the formula from loading." % len(problems))
         return 1
 
-    print("clean -- no reserved-name collisions, and every call follows its definition.")
+    print("clean -- no reserved-name collisions, every call follows its definition, "
+          "and every return is the last statement of its function.")
     return 0
 
 

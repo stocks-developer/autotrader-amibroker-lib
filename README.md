@@ -79,10 +79,11 @@ This repository also includes free, open-source AmiBroker AFL utilities under [`
 
 ## Checking the AFL
 
-[`tools/check-afl.py`](tools/check-afl.py) checks every `.afl` file here for two mistakes that stop a formula from loading in AmiBroker:
+[`tools/check-afl.py`](tools/check-afl.py) checks every `.afl` file here for three mistakes that stop a formula from loading in AmiBroker:
 
 - a variable or parameter named after a built-in AFL function, such as `status`
 - a function that is called before it is defined
+- a `return` that is not the last statement of its function, such as an early return from inside an `if`
 
 Run it from the repository root:
 
