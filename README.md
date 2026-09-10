@@ -77,6 +77,21 @@ Full step-by-step guide: **[AmiBroker library setup](https://stocksdeveloper.in/
 
 This repository also includes free, open-source AmiBroker AFL utilities under [`Formulas/`](Formulas/). They provide ready-made helper functions for common tasks that are not built into AmiBroker, to make writing AFL strategies easier. Use them as a reference and copy the code into your own AFL files.
 
+## Checking the AFL
+
+[`tools/check-afl.py`](tools/check-afl.py) checks every `.afl` file here for two mistakes that stop a formula from loading in AmiBroker:
+
+- a variable or parameter named after a built-in AFL function, such as `status`
+- a function that is called before it is defined
+
+Run it from the repository root:
+
+```
+python tools/check-afl.py
+```
+
+It prints the file and line of anything it finds, and exits with a non-zero code. It needs Python only, not AmiBroker.
+
 ## Pricing and free trial
 
 - **Free 1-month trial** on supported brokers, with every feature included.
