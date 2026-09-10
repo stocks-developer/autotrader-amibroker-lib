@@ -1,7 +1,38 @@
 /**
+* VERSION 2 of at-supertrend-scanner.afl -- trades WITHOUT the AutoTrader Desktop Client.
+*
+* Same strategy as at-supertrend-scanner.afl. The ONLY difference is the include line:
+* version 2 talks to the AutoTrader Web API directly over HTTPS, so there is
+* no second program to install and keep running.
+*
+* Needs AmiBroker 6.30 or newer. On anything older keep using at-supertrend-scanner.afl
+* with the Desktop Client.
+*
+* Put your API key in Formulas\Include\autotrader-http-config.afl before you
+* run it. Get the key from your account settings at
+* https://webx.stocksdeveloper.in/
+*/
+
+/**
 * AmiBroker supertrend with square-off option. 
-* You need to set appropriate values in chart parameters.
-* 
+* This afl shows the changes you need to run a AFL in scanner.
+* There is also a provision to use a symbol mapping file & quantity file.
+* You need to set appropriate values in scanner parameters.
+******************************************************************* 
+* The symbol mapping file should contain comma separated values.
+* Format: Datafeed Symbol,AutoTrader Web Symbol
+* Example: 
+* BANKNIFTY-I,BANKNIFTY_24-SEP-2020_FUT
+* BANKNIFTY-II,BANKNIFTY_26-NOV-2020_FUT
+* NIFTY-I,NIFTY_24-SEP-2020_FUT
+******************************************************************** 
+* The quantity mapping file should contain comma separated values.
+* Format: Datafeed Symbol,Quantity
+* Example: 
+* BANKNIFTY-I,50
+* BANKNIFTY-II,25
+* NIFTY-I,75
+*******************************************************************
 * User Guide: https://stocksdeveloper.in/documentation/index/
 * API Docs: https://stocksdeveloper.in/documentation/api/
 * Symbol Search: https://stocksdeveloper.in:9013/instrument
@@ -14,8 +45,10 @@
 * This section contains all includes & should be at the top of your strategy afl.
 ********************************************************************/
 
-#include <autotrader.afl>
+#include <autotrader-v2.afl>
 #include <autotrader-square-off.afl>
+#include <autotrader-symbol-mapping.afl>
+#include <autotrader-quantity-mapping.afl>
 #include <autotrader-next-bar.afl>
 
 /******************************************************************** 
@@ -28,6 +61,8 @@
 * There are many configurations available, please see chart parameters:
 * - Automated time based square-off
 * - Ability to place order on next bar or candle
+* - Ability to map datafeed symbol to API symbol
+* - Ability to use different quantity per symbol
 *
 * NOTE: It is recommended to start with a blank chart.
 ********************************************************************/
@@ -143,7 +178,7 @@ if(shouldSquareOff()) {
 	if(!isSquareOffRequestSent()) {
 		// Square off position, as current time has gone passed square off time
 		// Assuming the position is MIS
-		squareOffPosition(AT_ACCOUNT, "DAY", "MIS", AT_EXCHANGE, AT_SYMBOL);
+		squareOffPosition(AT_ACCOUNT, "DAY", "MIS", AT_EXCHANGE, getSymbol(Name()));
 		
 		saveStaticVariable(AT_ACCOUNT, AT_SQUARE_OFF_STATUS_KEY, 1);
 	}
@@ -165,28 +200,28 @@ else {
 	*/
 	if ( LastValue(BuySignal) == True && isNewBar() )
 	{
-		/* 
-		* We do some calculation to double the quantity, for all orders except first.
-		* This is done so that we can re-enter a position. Following this approach
-		* we can avoid using Short & Cover.
-		*/
-		quantity = calcDoubleQuantity(AT_ACCOUNT, AT_SYMBOL, AT_QUANTITY);
+			/* 
+			* We do some calculation to double the quantity, for all orders except first.
+			* This is done so that we can re-enter a position. Following this approach
+			* we can avoid using Short & Cover.
+			*/
+			quantity = calcDoubleQuantity(AT_ACCOUNT, getSymbol(Name()), getQuantity(Name()));
 
-		placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "BUY", "MARKET", 
-			AT_PRODUCT_TYPE, quantity, buyPrice, defaultTriggerPrice(), True);
+			placeOrder(AT_ACCOUNT, AT_EXCHANGE, getSymbol(Name()), "BUY", "MARKET", 
+				AT_PRODUCT_TYPE, quantity, buyPrice, defaultTriggerPrice(), True);
 	}
 
 	if ( LastValue(SellSignal) == True && isNewBar() )
 	{	
-		/* 
-		* We do some calculation to double the quantity, for all orders except first.
-		* This is done so that we can re-enter a position. Following this approach
-		* we can avoid using Short & Cover.
-		*/
-		quantity = calcDoubleQuantity(AT_ACCOUNT, AT_SYMBOL, AT_QUANTITY);
-		
-		placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "SELL", "MARKET", 
-			AT_PRODUCT_TYPE, quantity, sellPrice, defaultTriggerPrice(), True);
+			/* 
+			* We do some calculation to double the quantity, for all orders except first.
+			* This is done so that we can re-enter a position. Following this approach
+			* we can avoid using Short & Cover.
+			*/
+			quantity = calcDoubleQuantity(AT_ACCOUNT, getSymbol(Name()), getQuantity(Name()));
+			
+			placeOrder(AT_ACCOUNT, AT_EXCHANGE, getSymbol(Name()), "SELL", "MARKET", 
+				AT_PRODUCT_TYPE, quantity, sellPrice, defaultTriggerPrice(), True);
 	}
 	
 	if(AT_PLACE_ORDER_ON_NEXT_BAR) {

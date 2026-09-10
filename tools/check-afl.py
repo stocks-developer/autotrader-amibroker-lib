@@ -66,7 +66,7 @@ NAMES = Path(__file__).resolve().parent / "afl-reserved-names.txt"
 # The two entry points. Each pulls its own chain of includes, and the order
 # matters for check 2, so the chain is read from the file rather than listed
 # here -- a new #include is then covered automatically.
-ENTRY_POINTS = ["autotrader-http.afl", "autotrader.afl"]
+ENTRY_POINTS = ["autotrader-v2.afl", "autotrader-http.afl", "autotrader.afl"]
 
 # AmiBroker's predefined PRICE ARRAYS. Deliberately not in
 # afl-reserved-names.txt: that file is AmiBroker's function reference, and these
@@ -119,22 +119,36 @@ def strip_noise(src):
     return src
 
 
-def chain_for(entry):
-    """The include list of `entry`, in order, followed by `entry` itself.
+def chain_for(entry, files=None, stack=None):
+    """The include list of `entry`, depth first, followed by `entry` itself.
 
     Comments are stripped first. Both entry points document their own usage
-    with a literal `#include <autotrader-http.afl>` line inside the header
+    with a literal `#include <autotrader-v2.afl>` line inside the header
     comment, and reading that as a real include puts the entry point at the
     front of its own chain -- which then reports every helper it calls as
     undefined.
+
+    RECURSIVE, because an entry point may be a thin alias for another one:
+    autotrader-http.afl is now a single `#include_once<autotrader-v2.afl>`,
+    kept so that strategies written before the version-2 naming keep working.
+    A one-level walk saw only that alias, missed text-util and friends behind
+    it, and reported every helper the real entry calls as undefined.
     """
+    if files is None:
+        files = []
+    if stack is None:
+        stack = set()
+    if entry in stack:
+        return files
+    stack.add(entry)
+
     text = strip_noise((INCLUDE / entry).read_text(encoding="utf-8", errors="replace"))
-    files = []
     for m in re.finditer(r"#include(?:_once)?\s*<\s*([^>]+?)\s*>", text, re.I):
         name = m.group(1).strip()
         if name != entry and (INCLUDE / name).exists() and name not in files:
-            files.append(name)
-    files.append(entry)
+            chain_for(name, files, stack)
+    if entry not in files:
+        files.append(entry)
     return files
 
 

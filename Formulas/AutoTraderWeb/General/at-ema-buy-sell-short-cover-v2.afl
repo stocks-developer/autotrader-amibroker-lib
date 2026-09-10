@@ -1,5 +1,21 @@
 /**
+* VERSION 2 of at-ema-buy-sell-short-cover.afl -- trades WITHOUT the AutoTrader Desktop Client.
+*
+* Same strategy as at-ema-buy-sell-short-cover.afl. The ONLY difference is the include line:
+* version 2 talks to the AutoTrader Web API directly over HTTPS, so there is
+* no second program to install and keep running.
+*
+* Needs AmiBroker 6.30 or newer. On anything older keep using at-ema-buy-sell-short-cover.afl
+* with the Desktop Client.
+*
+* Put your API key in Formulas\Include\autotrader-http-config.afl before you
+* run it. Get the key from your account settings at
+* https://webx.stocksdeveloper.in/
+*/
+
+/**
 * AmiBroker moving average crossover with square-off option. 
+* This strategy makes use of Buy, Sell, Short & Cover signals.
 * You need to set appropriate values in chart parameters.
 * 
 * User Guide: https://stocksdeveloper.in/documentation/index/
@@ -14,7 +30,7 @@
 * This section contains all includes & should be at the top of your strategy afl.
 ********************************************************************/
 
-#include <autotrader.afl>
+#include <autotrader-v2.afl>
 #include <autotrader-square-off.afl>
 #include <autotrader-next-bar.afl>
 
@@ -26,9 +42,8 @@
 /*******************************************************************
 * Moving average crossover with auto square off.
 * This strategy works well with market orders.
-* This strategy also shows how can we avoid Short & Cover by doubling
-* quantity on all orders except the first one.
-* 
+* This strategy makes use of Buy, Sell, Short & Cover signals.
+*
 * There are many configurations available, please see chart parameters:
 * - Automated time based square-off
 * - Ability to place order on next bar or candle
@@ -55,7 +70,7 @@
 * This section contains your strategy afl code.
 ********************************************************************/
 
-_SECTION_BEGIN("Moving Average");
+_SECTION_BEGIN("Moving Average: Buy-Sell-Short-Cover");
 
 // Moving Average
 SHORT_MA_PERIOD = Param("Short term moving average period", 20, 1, 200, 2);
@@ -65,6 +80,27 @@ LONG_MA_PERIOD = Param("Long term moving average period", 40, 1, 200, 2);
 // https://forum.amibroker.com/t/program-pauses-when-amibroker-minimized/4145/2
 RefreshPeriod = Param( "Timed Refresh Period", 5, 1, 300);
 RequestTimedRefresh(RefreshPeriod, False);
+
+ORDER_COUNT = "ORDER_COUNT";
+LAST_SIGNAL = "LAST_SIGNAL";
+
+function getPlacedOrderCount() {
+	return Nz(readStaticVariable(AT_ACCOUNT, ORDER_COUNT));
+}
+
+function incrementPlacedOrderCount(lastOrderId) {
+	if(lastOrderId != "") {
+		saveStaticVariable(AT_ACCOUNT, ORDER_COUNT, getPlacedOrderCount() + 1);
+	}
+}
+
+function getPreviousSignal() {
+	return readStaticVariableText(AT_ACCOUNT, LAST_SIGNAL);
+}
+
+function setPreviousSignal(signalType) {
+	return saveStaticVariableText(AT_ACCOUNT, LAST_SIGNAL, signalType);
+}
 
 /* Exponential Moving averages */
 EMA1 = EMA( C, SHORT_MA_PERIOD); 
@@ -78,17 +114,20 @@ Sell = Cross(EMA2,EMA1);
 Buy = ExRem(Buy,Sell);
 Sell = ExRem(Sell,Buy);
 
-// This is only added for backtesting
-Short=Sell;
-Cover=Buy;
+/* You can add your own conditions for Short & Cover */
+Short = Sell;
+Cover = Buy;
 
 /* Prices when Buy, Sell, Short, Cover condition is true  */
 //buyPrice = ValueWhen(Buy,C);
 //sellPrice = ValueWhen(Sell,C);
 
 /* We use live prices here, as ValueWhen function gives negative price sometimes */
+/* You can use a different price as well */
 buyPrice = LastValue(C);
 sellPrice = LastValue(C);
+shortPrice = LastValue(C);
+coverPrice = LastValue(C);
 
 /* Plot Buy and Sell Signal Arrows */
 shape = Buy * shapeUpArrow + Sell * shapeDownArrow;
@@ -125,38 +164,56 @@ if(shouldSquareOff()) {
 }
 else {
 
+	orderCount = getPlacedOrderCount();
+
 	BuySignal = Buy;
 	SellSignal = Sell;
+	ShortSignal = Short;
+	CoverSignal = Cover;
 
-	if(AT_PLACE_ORDER_ON_NEXT_BAR) {
+	if(AT_PLACE_ORDER_ON_NEXT_BAR) {		
 		// Use signals from previous bar (when place order on next bar is turned on)
 		BuySignal = Ref(Buy, -1);
-		SellSignal = Ref(Sell, -1);		
+		SellSignal = Ref(Sell, -1);
+		ShortSignal = Ref(Short, -1);
+		CoverSignal = Ref(Cover, -1);
 	}
 
 	/* 
 	* If control reaches here, it means we are before square off time,
 	* so we can place orders.
 	*/
-	if ( LastValue(BuySignal) == True && isNewBar() )
+	if ( LastValue(BuySignal) == True && getPreviousSignal() != "COVER" && isNewBar() )
 	{
-		/* 
-		* We do some calculation to double the quantity, for all orders except first.
-		* This is done so that we can re-enter a position. Following this approach
-		* we can avoid using Short & Cover.
-		*/
-		quantity = calcDoubleQuantity(AT_ACCOUNT, AT_SYMBOL, AT_QUANTITY);
-
-		placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "BUY", "MARKET", 
-			AT_PRODUCT_TYPE, quantity, buyPrice, defaultTriggerPrice(), True);
+		orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "BUY", "MARKET", 
+			AT_PRODUCT_TYPE, AT_QUANTITY, buyPrice, defaultTriggerPrice(), True);
+		incrementPlacedOrderCount(orderId);
+		setPreviousSignal("BUY");
 	}
 	
-	if ( LastValue(SellSignal) == True && isNewBar() )
+	if ( LastValue(SellSignal) == True && orderCount > 1 && 
+		getPreviousSignal() != "SHORT" && isNewBar() )
 	{	
-		quantity = calcDoubleQuantity(AT_ACCOUNT, AT_SYMBOL, AT_QUANTITY);
-		
-		placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "SELL", "MARKET", 
-			AT_PRODUCT_TYPE, quantity, sellPrice, defaultTriggerPrice(), True);
+		orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "SELL", "MARKET", 
+			AT_PRODUCT_TYPE, AT_QUANTITY, sellPrice, defaultTriggerPrice(), True);
+		incrementPlacedOrderCount(orderId);
+		setPreviousSignal("SELL");
+	}
+
+	if ( LastValue(ShortSignal) == True && isNewBar() )
+	{
+		orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "SHORT", "MARKET", 
+			AT_PRODUCT_TYPE, AT_QUANTITY, buyPrice, defaultTriggerPrice(), True);
+		incrementPlacedOrderCount(orderId);
+		setPreviousSignal("SHORT");
+	}
+	
+	if ( LastValue(CoverSignal) == True && orderCount > 1 && isNewBar() )
+	{	
+		orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL, "COVER", "MARKET", 
+			AT_PRODUCT_TYPE, AT_QUANTITY, sellPrice, defaultTriggerPrice(), True);
+		incrementPlacedOrderCount(orderId);
+		setPreviousSignal("COVER");
 	}
 
 	if(AT_PLACE_ORDER_ON_NEXT_BAR) {

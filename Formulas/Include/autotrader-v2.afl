@@ -1,0 +1,53 @@
+/******************************************************************************
+*
+* AutoTrader Web API library -- direct (HTTP) version.
+* DO NOT MODIFY THIS FILE
+* Version: 1.0
+*
+* Include this INSTEAD OF autotrader.afl to trade without the AutoTrader
+* Desktop Client:
+*
+*     #include <autotrader-v2.afl>
+*
+* Then put your API key in autotrader-http-config.afl. That is the whole setup
+* -- there is no folder to configure and no second program to keep running.
+*
+* Everything else stays as it was. The function names, their arguments and what
+* they return are the same as the file based library, so an existing strategy
+* changes one line. The three differences are listed at the top of
+* autotrader-http-api.afl; the important one is that placeOrder() now returns
+* the broker's own order id.
+*
+* Needs AmiBroker 6.30 or newer. On anything older, keep using autotrader.afl
+* with the Desktop Client.
+*
+******************************************************************************/
+
+/* Import public amibroker libraries */
+
+#include_once<misc-util.afl>
+#include_once<text-util.afl>
+#include_once<file-util.afl>
+#include_once<conversion-util.afl>
+#include_once<logs-util.afl>
+
+/* Import AutoTrader specific amibroker libraries */
+
+#include_once<autotrader-pre-util.afl>
+#include_once<autotrader-http-config.afl>
+#include_once<autotrader-defaults.afl>
+#include_once<autotrader-http-transport.afl>
+#include_once<autotrader-http-api.afl>
+#include_once<autotrader-post-util.afl>
+
+/*
+* Say plainly when the key has not been filled in.
+*
+* Without this the first symptom is an order that does not appear, and the
+* reason for it is a rejection buried in a log file. Better to be told once,
+* on the chart, that the one setup step was missed.
+*/
+if(AT_API_KEY == "<API_KEY>" OR strIsEmpty(AT_API_KEY)) {
+	_TRACE("AutoTrader: SD-ERR-AB-CONFIG: No API key. Open autotrader-http-config.afl " +
+		"and set AT_API_KEY to the key from your AutoTrader Web account settings.");
+}

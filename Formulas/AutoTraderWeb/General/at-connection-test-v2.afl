@@ -1,0 +1,153 @@
+/**
+* VERSION 2 -- check your setup works, before you trade with it.
+*
+* Run this FIRST, on the day you install the library. It answers the only
+* question that matters at the start: can this copy of AmiBroker reach your
+* AutoTrader Web account and read your portfolio back correctly?
+*
+* IT PLACES NOTHING. It never places, modifies, cancels or squares off an
+* order. It only reads, and only when you press the button.
+*
+* HOW TO USE IT
+* 1. Apply this formula to any chart.
+* 2. Right-click the chart -> Parameters.
+* 3. Put your pseudo account name in "Account". This is the name you see on
+*    the AutoTrader Web portfolio screen, not your broker login id.
+* 4. Press "RUN THE TEST NOW".
+* 5. Read the result on the chart.
+*
+* BEFORE YOU RUN IT: put your API key in
+* Formulas\Include\autotrader-http-config.afl. Get it from your account
+* settings at https://webx.stocksdeveloper.in/
+*
+* Needs AmiBroker 6.30 or newer.
+*
+* User Guide: https://stocksdeveloper.in/documentation/index/
+* API Docs: https://stocksdeveloper.in/documentation/api/
+*
+* Author - Stocks Developer
+*/
+
+#include <autotrader-v2.afl>
+
+_SECTION_BEGIN("Connection test");
+
+/*
+* AT_ACCOUNT comes from the library, so the "Account" parameter here is the
+* same one every other sample uses.
+*/
+atcGo = ParamTrigger("Run the test", "RUN THE TEST NOW");
+
+ATC_RESULT_KEY = "AT_CONNECTION_TEST_RESULT";
+
+if(atcGo)
+{
+	atcOut = "AUTOTRADER WEB - CONNECTION TEST (version 2)" + "\n";
+	atcOut = atcOut + "Account : " + AT_ACCOUNT + "\n";
+	atcOut = atcOut + "Run at  : " + Now(1) + "\n";
+	atcOut = atcOut + "----------------------------------------------" + "\n";
+
+	/*
+	* 1. MARGINS.
+	*
+	* If this comes back as zeros and everything below is empty, the usual
+	* cause is the API key or the account name, not the network.
+	*/
+	atcOut = atcOut + "1) MARGINS (equity)" + "\n";
+	atcOut = atcOut + "   funds     = " + NumToStr(getMarginFundsEquity(AT_ACCOUNT), 1.2) + "\n";
+	atcOut = atcOut + "   utilized  = " + NumToStr(getMarginUtilizedEquity(AT_ACCOUNT), 1.2) + "\n";
+	atcOut = atcOut + "   available = " + NumToStr(getMarginAvailableEquity(AT_ACCOUNT), 1.2) + "\n";
+
+	/*
+	* 2. The same three numbers, read by NAME instead of by position.
+	*
+	* They must agree. The two paths find the column in completely different
+	* ways, so agreement is a real check and not a formality.
+	*/
+	atcMargin = atFindMargin(AT_ACCOUNT, "EQUITY");
+	atcOut = atcOut + "2) THE SAME NUMBERS, READ BY COLUMN NAME" + "\n";
+	if(atFound(atcMargin))
+	{
+		atcOut = atcOut + "   FUNDS     = " + atText(atcMargin, "FUNDS") + "\n";
+		atcOut = atcOut + "   AVAILABLE = " + atText(atcMargin, "AVAILABLE") + "\n";
+		atcOut = atcOut + "   NET       = " + atText(atcMargin, "NET") + "\n";
+	}
+	else
+	{
+		atcOut = atcOut + "   NOT FOUND - no equity margin row came back" + "\n";
+	}
+
+	/*
+	* 3, 4 and 5. Walk the portfolio.
+	*
+	* NOTE THE LOOP: rows are numbered 1 to count, NOT 0 to count-1. Starting
+	* at 0 silently reads nothing for the first row and misses the last one.
+	*/
+	atcCount = atHoldingCount(AT_ACCOUNT);
+	atcOut = atcOut + "3) HOLDINGS - count = " + NumToStr(atcCount, 1.0) + "\n";
+	for(atcI = 1; atcI <= atcCount AND atcI <= 5; atcI++)
+	{
+		atcRow = atHoldingAt(AT_ACCOUNT, atcI);
+		atcOut = atcOut + "   " + atText(atcRow, "INDEPENDENTSYMBOLNSE") +
+			"  qty=" + atText(atcRow, "QUANTITY") +
+			"  avg=" + atText(atcRow, "AVGPRICE") +
+			"  ltp=" + atText(atcRow, "LTP") +
+			"  pnl=" + atText(atcRow, "PNL") + "\n";
+	}
+
+	atcCount = atPositionCount(AT_ACCOUNT);
+	atcOut = atcOut + "4) POSITIONS - count = " + NumToStr(atcCount, 1.0) + "\n";
+	for(atcI = 1; atcI <= atcCount AND atcI <= 5; atcI++)
+	{
+		atcRow = atPositionAt(AT_ACCOUNT, atcI);
+		atcOut = atcOut + "   " + atText(atcRow, "INDEPENDENTSYMBOL") +
+			"  net=" + atText(atcRow, "NETQUANTITY") +
+			"  dir=" + atText(atcRow, "DIRECTION") +
+			"  pnl=" + atText(atcRow, "PNL") + "\n";
+	}
+
+	atcCount = atOrderCount(AT_ACCOUNT);
+	atcOut = atcOut + "5) ORDERS TODAY - count = " + NumToStr(atcCount, 1.0) + "\n";
+	for(atcI = 1; atcI <= atcCount AND atcI <= 5; atcI++)
+	{
+		atcRow = atOrderAt(AT_ACCOUNT, atcI);
+		atcOut = atcOut + "   id=" + atText(atcRow, "ID") +
+			"  " + atText(atcRow, "INDEPENDENTSYMBOL") +
+			"  " + atText(atcRow, "TRADETYPE") +
+			"  status=" + atText(atcRow, "STATUS") + "\n";
+	}
+
+	/*
+	* 6. A symbol you do not hold.
+	*
+	* atFound() must say 0. This separates "there is no such row" from "the
+	* lookup itself broke" -- before atFound() existed those two looked
+	* identical, and a wrong answer could pass for an empty one.
+	*/
+	atcMissing = atFindHolding(AT_ACCOUNT, "NSE", "NO_SUCH_SYMBOL_XYZ");
+	atcOut = atcOut + "6) A SYMBOL YOU DO NOT HOLD" + "\n";
+	atcOut = atcOut + "   found = " + NumToStr(atFound(atcMissing), 1.0) +
+		"   (0 is the correct answer)" + "\n";
+
+	atcOut = atcOut + "----------------------------------------------" + "\n";
+	atcOut = atcOut + "TEST FINISHED" + "\n";
+
+	amiStaticVarSetText(ATC_RESULT_KEY, atcOut);
+	_TRACE(atcOut);
+}
+
+atcShow = amiStaticVarGetText(ATC_RESULT_KEY);
+if(atcShow == "")
+{
+	atcShow = "AUTOTRADER WEB - CONNECTION TEST (version 2)" + "\n" + "\n" +
+		"Nothing has run yet." + "\n" + "\n" +
+		"1. Right-click this chart -> Parameters" + "\n" +
+		"2. Put your pseudo account name in 'Account'" + "\n" +
+		"3. Press 'RUN THE TEST NOW'" + "\n" + "\n" +
+		"This test only reads. It places no orders.";
+}
+
+Title = atcShow;
+GraphXSpace = 5;
+
+_SECTION_END();

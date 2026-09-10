@@ -1,4 +1,19 @@
 /**
+* VERSION 2 of at-supertrend.afl -- trades WITHOUT the AutoTrader Desktop Client.
+*
+* Same strategy as at-supertrend.afl. The ONLY difference is the include line:
+* version 2 talks to the AutoTrader Web API directly over HTTPS, so there is
+* no second program to install and keep running.
+*
+* Needs AmiBroker 6.30 or newer. On anything older keep using at-supertrend.afl
+* with the Desktop Client.
+*
+* Put your API key in Formulas\Include\autotrader-http-config.afl before you
+* run it. Get the key from your account settings at
+* https://webx.stocksdeveloper.in/
+*/
+
+/**
 * AmiBroker supertrend with square-off option. 
 * You need to set appropriate values in chart parameters.
 * 
@@ -14,7 +29,7 @@
 * This section contains all includes & should be at the top of your strategy afl.
 ********************************************************************/
 
-#include <autotrader.afl>
+#include <autotrader-v2.afl>
 #include <autotrader-square-off.afl>
 #include <autotrader-next-bar.afl>
 

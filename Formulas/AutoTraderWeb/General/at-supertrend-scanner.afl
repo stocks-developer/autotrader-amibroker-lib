@@ -56,7 +56,13 @@
 * How to see strategy logs in AMIBroker?
 * 1. Enable log window from amibroker menu (Window -> Log)
 * 2. You will see log window at the bottom.
-* 3. Go to "Trace" tab (all strategy logs are printed here).
+* 3. Go to "Trace" tab.
+* 4. RIGHT-CLICK inside the log window, then Trace Output -> tick "Internal".
+*
+* Step 4 is easy to miss and nothing is logged without it. "Internal" is NOT
+* ticked by default, so until you tick it the Trace tab stays empty however
+* well your strategy is running. AmiBroker says so itself in the empty tab:
+* "Internal _TRACE() output is NOT enabled."
 ********************************************************************/
 
 

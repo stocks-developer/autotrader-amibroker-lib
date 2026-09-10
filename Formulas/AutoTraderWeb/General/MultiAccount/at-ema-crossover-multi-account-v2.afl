@@ -1,5 +1,20 @@
 /**
-* AmiBroker supertrend with square-off option (for multiple accounts). 
+* VERSION 2 of at-ema-crossover-multi-account.afl -- trades WITHOUT the AutoTrader Desktop Client.
+*
+* Same strategy as at-ema-crossover-multi-account.afl. The ONLY difference is the include line:
+* version 2 talks to the AutoTrader Web API directly over HTTPS, so there is
+* no second program to install and keep running.
+*
+* Needs AmiBroker 6.30 or newer. On anything older keep using at-ema-crossover-multi-account.afl
+* with the Desktop Client.
+*
+* Put your API key in Formulas\Include\autotrader-http-config.afl before you
+* run it. Get the key from your account settings at
+* https://webx.stocksdeveloper.in/
+*/
+
+/**
+* AmiBroker moving average crossover with square-off option (for multiple accounts). 
 * You need to set appropriate values in chart parameters.
 * 
 * User Guide: https://stocksdeveloper.in/documentation/index/
@@ -14,7 +29,7 @@
 * This section contains all includes & should be at the top of your strategy afl.
 ********************************************************************/
 
-#include <autotrader.afl>
+#include <autotrader-v2.afl>
 #include <autotrader-square-off.afl>
 #include <autotrader-next-bar.afl>
 
@@ -22,8 +37,12 @@
 * SECTION 1 - END
 ********************************************************************/
 
+
 /*******************************************************************
-* SuperTrend indicator based automated trading afl example.
+* Moving average crossover with auto square off.
+* This strategy works well with market orders.
+* This strategy also shows how can we avoid Short & Cover by doubling
+* quantity on all orders except the first one.
 * 
 * There are many configurations available, please see chart parameters:
 * - Automated time based square-off
@@ -51,96 +70,67 @@
 * This section contains your strategy afl code.
 ********************************************************************/
 
-_SECTION_BEGIN("Supertrend - Multiple Accounts");         
+_SECTION_BEGIN("Moving Average - Multiple Accounts");
 
 // Account names parameter
 AT_ACCOUNTS = ParamStr("Accounts (comma separated)", "ACC1,ACC2,ACC3");
 
-// SuperTrend parameters
-Multiplier = Param("Period", 7, 1, 50 );
-Period = Param("Multiplier", 3, 1, 10 );
-
-// Chart parameters
-UpColor = ParamColor("Up Color", colorGreen);
-DownColor = ParamColor("Down Color", colorRed);
-WickUpColor = ParamColor("Wick UP Color", colorLime);
-WickDownColor = ParamColor("Wick Down Color", colorOrange);
-ResistanceColor = ParamColor("Resistance", colorRed);
-SupportColor = ParamColor( "Support", colorGreen);
-Style = ParamStyle("Line Style", styleThick);
+// Moving Average
+SHORT_MA_PERIOD = Param("Short term moving average period", 20, 1, 200, 2);
+LONG_MA_PERIOD = Param("Long term moving average period", 40, 1, 200, 2);
 
 // Refresh even when minimized, see below link
 // https://forum.amibroker.com/t/program-pauses-when-amibroker-minimized/4145/2
 RefreshPeriod = Param( "Timed Refresh Period", 5, 1, 300);
 RequestTimedRefresh(RefreshPeriod, False);
-   
-SetChartOptions(0, chartShowArrows|chartShowDates);        
-       
-SetBarFillColor(IIf(C>O, UpColor, IIf(C<=O, DownColor, colorLightGrey)));        
 
-Plot(C, "Price", IIf(C>O, WickUpColor, IIf(C<=O, WickDownColor, colorLightGrey)), styleCandle | styleNoTitle);
+/* Exponential Moving averages */
+EMA1 = EMA( C, SHORT_MA_PERIOD); 
+EMA2 = EMA( C, LONG_MA_PERIOD);
 
-_N(Title = "Supertrend: " + 
-	StrFormat("{{INTERVAL}} {{DATE}} \nOpen= %g, HiGH= %g, LoW= %g, Close= %g (%.1f%%) {{VALUES}}", 
-		O, H, L, C, SelectedValue( ROC( C, 1 ) ) ));         
-        
-function calculateSupertrend(Period, Multiplier)
-{
-	ATR_Val=ATR(Period);
+/* Buy and Sell Condition */
+Buy = Cross(EMA1,EMA2);
+Sell = Cross(EMA2,EMA1);
 
-	UpperBand=LowerBand=final_UpperBand=final_LowerBand=SuperTrend=0;
-	
-	for( i = Period; i < BarCount; i++ )
-	{
-		UpperBand[i]=((High[i] + Low[i])/2) + Multiplier*ATR_Val[i];
-		LowerBand[i]=((High[i] + Low[i])/2) - Multiplier*ATR_Val[i];
-		final_UpperBand[i] = IIf( ((UpperBand[i]<final_UpperBand[i-1]) OR (Close[i-1]>final_UpperBand[i-1])), (UpperBand[i]), final_UpperBand[i-1]);
-		final_LowerBand[i] = Iif( ((LowerBand[i]>final_LowerBand[i-1]) OR (Close[i-1]<final_LowerBand[i-1])), (LowerBand[i]), final_LowerBand[i-1]);
-			
-		SuperTrend[i] = IIf(((SuperTrend[i-1]==final_UpperBand[i-1]) AND (Close[i]<=final_UpperBand[i])),final_UpperBand[i],
-		IIf(((SuperTrend[i-1]==final_UpperBand[i-1]) AND (Close[i]>=final_UpperBand[i])),final_LowerBand[i],
-		IIf(((SuperTrend[i-1]==final_LowerBand[i-1]) AND (Close[i]>=final_LowerBand[i])),final_LowerBand[i],
-		IIf(((SuperTrend[i-1]==final_LowerBand[i-1]) AND (Close[i]<=final_LowerBand[i])),final_UpperBand[i],0))));
-
-	}
-	
-	Plot( SuperTrend, "SuperTrend", IIf( SuperTrend>Close, ResistanceColor, SupportColor), Style);
-	Return SuperTrend;  
-}
-
-SuperTrend = calculateSupertrend(Period,Multiplier);
-
-// This will tell us if the line is green or red (i.e. buy or sell)
-// Close > Supertrend == BUY Signal otherwise SELL
-SupertrendSignal = Close > SuperTrend;
-
-// This will tell us whenever there is a change in signal
-SignalChanged = SupertrendSignal != Ref(SupertrendSignal, -1);
-
-// If supertrend is buy and signal just changed
-Buy = SupertrendSignal AND SignalChanged;
-
-// If supertrend is sell and signal just changed
-Sell = (!SupertrendSignal) AND SignalChanged;
-
-// Additional safety, remove excessive signals
-Buy=ExRem(Buy,Sell);
-Sell=ExRem(Sell,Buy);
+/* Remove excess signals */
+Buy = ExRem(Buy,Sell);
+Sell = ExRem(Sell,Buy);
 
 // This is only added for backtesting
 Short=Sell;
 Cover=Buy;
 
+/* Prices when Buy, Sell, Short, Cover condition is true  */
+//buyPrice = ValueWhen(Buy,C);
+//sellPrice = ValueWhen(Sell,C);
+
+/* We use live prices here, as ValueWhen function gives negative price sometimes */
+buyPrice = LastValue(C);
+sellPrice = LastValue(C);
+
+/* Plot Buy and Sell Signal Arrows */
+shape = Buy * shapeUpArrow + Sell * shapeDownArrow;
+PlotShapes( shape, IIf( Buy, colorGreen, colorRed ), 0, IIf( Buy, Low, High ) );
+GraphXSpace = 5;
+
+/* Plot EMA lines and Candles */
+Plot(EMA1,"EMA", colorRed);
+Plot(EMA2,"EMA2", colorGreen);
+Plot(C, "Close", colorRed, styleCandle);
+
+
 /******************************************************************** 
 * SECTION 2 - END
 ********************************************************************/
+
 
 /******************************************************************** 
 * SECTION 3 - BEGIN
 * This section contains your code for placing orders.
 ********************************************************************/
+
 /*
-* shouldSquareOff() returns 1 when current time goes beyond square off time.
+* shouldSquareOff() returns True, when current time goes beyond square off time.
 */
 if(shouldSquareOff()) {
 	for(iter = 0; !strIsEmpty(acc = StrExtract(AT_ACCOUNTS, iter)); iter++ ) {
@@ -174,7 +164,6 @@ else {
 	*/
 	if ( LastValue(BuySignal) == True && isNewBar() )
 	{
-
 		for(iter = 0; !strIsEmpty(acc = StrExtract(AT_ACCOUNTS, iter)); iter++ ) {
 			message = "Placing BUY order for account [" + (iter + 1) + "] : " + acc;
 			logDebug(message);
@@ -191,7 +180,7 @@ else {
 				AT_PRODUCT_TYPE, quantity, buyPrice, defaultTriggerPrice(), True);
 		}
 	}
-
+	
 	if ( LastValue(SellSignal) == True && isNewBar() )
 	{	
 		
@@ -211,7 +200,7 @@ else {
 				AT_PRODUCT_TYPE, quantity, sellPrice, defaultTriggerPrice(), True);
 		}
 	}
-	
+
 	if(AT_PLACE_ORDER_ON_NEXT_BAR) {
 		// Special handling when place order on next bar or candle is ON
 		// This must be done after place order code
@@ -226,6 +215,7 @@ else {
 	}
 	
 }
+
 /******************************************************************** 
 * SECTION 3 - END
 ********************************************************************/

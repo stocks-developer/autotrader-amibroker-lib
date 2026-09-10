@@ -58,10 +58,12 @@ AmiBroker talks to AutoTrader Web directly. Needs **AmiBroker 6.30 or newer**.
 4. Include the library at the top of your strategy AFL:
 
 ```c
-#include <autotrader-http.afl>
+#include <autotrader-v2.afl>
 ```
 
-4. Place an order. The same call works on every supported broker:
+5. Check it works before you trade with it. Apply `Formulas\AutoTraderWeb\General\at-connection-test-v2.afl` to any chart, put your pseudo account name in **Parameters -> Account**, and press **RUN THE TEST NOW**. It reads your margins, holdings, positions and orders, and places nothing.
+
+6. Place an order. The same call works on every supported broker:
 
 ```c
 orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL,
@@ -70,6 +72,33 @@ orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL,
 ```
 
 Ready-made sample AFLs (regular / bracket / cover orders, scanners, button trading and multi-account trading) install under `Formulas\AutoTraderWeb`.
+
+### Version 1 and version 2
+
+Every sample comes twice, and the file name tells you which is which.
+
+| | Include | Needs |
+|---|---|---|
+| **Version 2** — files ending `-v2` | `#include <autotrader-v2.afl>` | AmiBroker 6.30 or newer. Nothing else. |
+| **Version 1** — the original file names | `#include <autotrader.afl>` | The AutoTrader Desktop Client, installed and running. |
+
+Version 2 sends orders to AutoTrader Web directly over HTTPS, so there is no second program to install and keep running. It is the one to start with.
+
+Version 1 is unchanged and is not going away. Use it if you are on AmiBroker 5.8 to 6.29, which version 2 cannot support.
+
+Moving a strategy from version 1 to version 2 is **one line** — the include. Every function keeps the same name, the same arguments and the same meaning.
+
+`#include <autotrader-http.afl>` still works and does the same thing as `autotrader-v2.afl`. It is the older name for it.
+
+### Seeing your strategy's log messages
+
+`_TRACE()` output does not appear until you switch it on, and AmiBroker leaves it **off**:
+
+1. **Window -> Log** opens the log panel.
+2. Click the **Trace** tab.
+3. **Right-click inside the log panel -> Trace Output -> tick "Internal".**
+
+Step 3 is the one people miss. Until "Internal" is ticked the Trace tab stays empty no matter how well your strategy is running — AmiBroker itself says so in the empty tab: *"Internal _TRACE() output is NOT enabled."*
 
 ### Which AmiBroker version we test on
 
@@ -115,6 +144,8 @@ for(i = 1; i <= atPositionCount(AT_ACCOUNT); i++)
 ```
 
 `atHoldingCount()` / `atHoldingAt()` and `atOrderCount()` / `atOrderAt()` work the same way.
+
+**Rows are numbered from 1, not from 0.** Start the loop at `1` and end it at `<= count`, exactly as above. A loop written `for(i = 0; i < count; i++)` out of C habit reads nothing at all for `i = 0` and never reaches the last row — and it does that silently, with no error, so it looks like missing data rather than a mistake in the loop.
 
 The older `getHoldingQuantity()`, `getPositionNetQuantity()`, `getOrderStatus()` style functions still work exactly as before and are not going away. Use these when you want to read several fields of the same row, or when you need to go through a portfolio without knowing the symbols in advance.
 

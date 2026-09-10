@@ -1,4 +1,19 @@
 /**
+* VERSION 2 of at-target-sl-without-bo.afl -- trades WITHOUT the AutoTrader Desktop Client.
+*
+* Same strategy as at-target-sl-without-bo.afl. The ONLY difference is the include line:
+* version 2 talks to the AutoTrader Web API directly over HTTPS, so there is
+* no second program to install and keep running.
+*
+* Needs AmiBroker 6.30 or newer. On anything older keep using at-target-sl-without-bo.afl
+* with the Desktop Client.
+*
+* Put your API key in Formulas\Include\autotrader-http-config.afl before you
+* run it. Get the key from your account settings at
+* https://webx.stocksdeveloper.in/
+*/
+
+/**
 * AmiBroker moving average with target & stoploss without using bracket order.
 * This is similar to placing a bracket order. Always use bracket order, 
 * if it is available to you. Otherwise you can use this approach.
@@ -16,7 +31,7 @@
 * This section contains all includes & should be at the top of your strategy afl.
 ********************************************************************/
 
-#include <autotrader.afl>
+#include <autotrader-v2.afl>
 #include <autotrader-square-off.afl>
 
 /******************************************************************** 

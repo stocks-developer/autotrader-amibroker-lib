@@ -4,8 +4,12 @@
 *
 * This is the same strategy as at-ema-crossover.afl, with one line changed --
 * the include -- plus the extra handling that becomes possible once orders are
-* sent directly: the broker answers straight away, so the strategy knows the
-* order id and can act on the outcome on the very same bar.
+* sent directly: placeOrder() hands back the broker's own order id straight
+* away, so the strategy has a handle on the order immediately.
+*
+* Having the id is NOT the same as knowing what happened to the order. Your
+* broker's order book takes a few seconds to catch up, so read the status on a
+* later bar. See "Reading an order back" in the README.
 *
 * BEFORE YOU RUN IT: open Formulas\Include\autotrader-http-config.afl and put
 * your API key in it. Get the key from your account settings at
@@ -29,7 +33,7 @@
 * The ONLY difference from the bridge version. Everything below uses the same
 * function names as before.
 */
-#include <autotrader-http.afl>
+#include <autotrader-v2.afl>
 
 #include <autotrader-square-off.afl>
 #include <autotrader-next-bar.afl>
@@ -43,7 +47,13 @@
 * How to see strategy logs in AmiBroker?
 * 1. Enable log window from amibroker menu (Window -> Log)
 * 2. You will see log window at the bottom.
-* 3. Go to "Trace" tab (all strategy logs are printed here).
+* 3. Go to "Trace" tab.
+* 4. RIGHT-CLICK inside the log window, then Trace Output -> tick "Internal".
+*
+* Step 4 is easy to miss and nothing is logged without it. "Internal" is NOT
+* ticked by default, so until you tick it the Trace tab stays empty however
+* well your strategy is running. AmiBroker says so itself in the empty tab:
+* "Internal _TRACE() output is NOT enabled."
 ********************************************************************/
 
 
@@ -131,8 +141,23 @@ procedure handleOrderResult(orderId, what) {
 	} else {
 		/*
 		* orderId is the BROKER's order id -- the same one you see in your
-		* broker's order book. Reading it back costs nothing extra: the reply
-		* is held for a couple of seconds and shared by every chart.
+		* broker's order book.
+		*
+		* READ THE TWO WARNINGS BELOW BEFORE COPYING THIS PATTERN.
+		*
+		* 1. getOrderStatus() is NOT free. It fetches your whole order book
+		*    from the broker, live. Replies are re-used for a couple of
+		*    seconds and shared by every chart, so a busy screen does not
+		*    repeat the request -- but the first call after that window is a
+		*    real broker request, and brokers rate-limit them.
+		*
+		* 2. Asked this soon, it will often be STALE. The order book takes a
+		*    few seconds to catch up, so a status read on the same bar as the
+		*    placement can show the state from BEFORE your order, or not find
+		*    the order at all. Neither means the order failed.
+		*
+		* It is logged here so you can see the round trip working. In a real
+		* strategy, read the status on a later bar instead.
 		*/
 		_TRACE(what + " placed. Order id: " + orderId +
 			", status: " + getOrderStatus(AT_ACCOUNT, orderId) +
