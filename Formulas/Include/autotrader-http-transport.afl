@@ -133,13 +133,13 @@ function atUrlEncode(text) {
 	total = StrLen(text);
 
 	for(i = 0; i < total; i++) {
-		c = StrMid(text, i, 1);
-		code = Asc(c);
+		ch = StrMid(text, i, 1);
+		code = Asc(ch);
 
 		if((code >= 48 AND code <= 57) OR (code >= 65 AND code <= 90) OR
-			(code >= 97 AND code <= 122) OR c == "-" OR c == "_" OR
-			c == "." OR c == "~") {
-			result = result + c;
+			(code >= 97 AND code <= 122) OR ch == "-" OR ch == "_" OR
+			ch == "." OR ch == "~") {
+			result = result + ch;
 		} else {
 			result = result + "%" +
 				StrMid(AT_HTTP_HEX, int(code / 16), 1) +
@@ -218,10 +218,10 @@ function atCsvField(line, column) {
 		if(skip) {
 			skip = False;
 		} else {
-			c = StrMid(line, i, 1);
+			ch = StrMid(line, i, 1);
 
 			if(quoted) {
-				if(c == AT_HTTP_QUOTE) {
+				if(ch == AT_HTTP_QUOTE) {
 					if(i < (total - 1) AND StrMid(line, i + 1, 1) == AT_HTTP_QUOTE) {
 						value = value + AT_HTTP_QUOTE;
 						skip = True;
@@ -229,13 +229,13 @@ function atCsvField(line, column) {
 						quoted = False;
 					}
 				} else {
-					value = value + c;
+					value = value + ch;
 				}
 			} else {
-				if(c == AT_HTTP_QUOTE AND StrLen(value) == 0) {
+				if(ch == AT_HTTP_QUOTE AND StrLen(value) == 0) {
 					quoted = True;
 				} else {
-					if(c == ",") {
+					if(ch == ",") {
 						if(field == column) {
 							result = value;
 							found = True;
@@ -245,7 +245,7 @@ function atCsvField(line, column) {
 						field++;
 						value = "";
 					} else {
-						value = value + c;
+						value = value + ch;
 					}
 				}
 			}

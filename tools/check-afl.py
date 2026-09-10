@@ -2,10 +2,11 @@
 """
 Catch the AFL mistakes that only real AmiBroker would otherwise catch.
 
-Both checks below are PARSE-TIME failures. A formula that trips either one does
-not load at all, and no part of it runs -- so a user sees a syntax error rather
-than a misbehaving strategy. Neither is visible by reading the code, and neither
-is caught by any test we can run without AmiBroker installed.
+Checks 1 to 3 are PARSE-TIME failures. A formula that trips one does not load at
+all, and no part of it runs -- so a user sees a syntax error rather than a
+misbehaving strategy. Check 4 is a RUNTIME failure: the formula loads perfectly
+and then dies on the first line that reaches it. None is visible by reading the
+code, and none is caught by any test that does not involve AmiBroker.
 
     1. Reserved names.  AFL's lexer turns every built-in function name into a
        FUNCT token. Using one as a variable, a parameter or a loop counter is:
@@ -33,6 +34,19 @@ is caught by any test we can run without AmiBroker installed.
        the file-based library obeys the rule (208 functions, one return each),
        which is why it never showed up there.
 
+    4. Built-in price arrays.  O H L C V and Avg are predefined ARRAYS, not
+       functions, so they are absent from the reserved-name list and check 1
+       cannot see them. AFL is case-insensitive, so a local called `c` IS the
+       Close array, and giving it a string fails when the line runs:
+
+           You can only assign ARRAY or NUMERIC value to any of OHLC, V, Avg arrays
+
+       This is the third real defect of this kind that shipped: `c` was the loop
+       character variable in atUrlEncode() and atCsvField(), so the direct
+       library LOADED correctly and then could not encode a request or read a
+       reply -- every getter returned 0 and no order could be placed. Because it
+       is a runtime failure, a load test passes and only a real call exposes it.
+
 Usage:
     python tools/check-afl.py           # from the repository root
     echo $?                             # 0 = clean, 1 = problems found
@@ -53,6 +67,24 @@ NAMES = Path(__file__).resolve().parent / "afl-reserved-names.txt"
 # matters for check 2, so the chain is read from the file rather than listed
 # here -- a new #include is then covered automatically.
 ENTRY_POINTS = ["autotrader-http.afl", "autotrader.afl"]
+
+# AmiBroker's predefined PRICE ARRAYS. Deliberately not in
+# afl-reserved-names.txt: that file is AmiBroker's function reference, and these
+# are arrays, not functions, so no amount of extending it would cover them.
+PRICE_ARRAYS = {
+    "o", "h", "l", "c", "v",
+    "open", "high", "low", "close", "volume",
+    "avg", "openint", "oi",
+}
+
+# Functions that return a STRING. Assigning one of these to a price array is
+# what produces the runtime error; assigning an array to it (C = MA(C, 10)) is
+# perfectly legal AFL, so only the string case is reported.
+STRING_FUNCS = {
+    "strmid", "strleft", "strright", "strextract", "strformat", "numtostr",
+    "strtrim", "strreplace", "strtoupper", "strtolower", "writeval", "writeif",
+    "datetimetostr", "datetostr", "timetostr", "strtrimleft", "strtrimright",
+}
 
 # Language keywords. Legal to write, never identifiers, so they must not be
 # reported even though some of them look like functions.
@@ -256,22 +288,86 @@ def check_return_placement():
     return problems
 
 
+def check_price_arrays():
+    """Check 4, over every .afl in the repository, samples included.
+
+    O H L C V and Avg are predefined price ARRAYS. AFL is case-insensitive, so a
+    local called `c` IS the Close array, and giving it a string fails when the
+    line actually runs:
+
+        You can only assign ARRAY or NUMERIC value to any of OHLC, V, Avg arrays
+
+    Unlike checks 1-3 this is a RUNTIME failure, not a parse failure. The
+    formula loads perfectly and then dies on the first call that reaches the
+    line -- which is exactly how it escaped: `c` was the loop character variable
+    in atUrlEncode() and atCsvField(), so the direct library loaded fine and
+    then could not encode a request or read a reply.
+
+    Only the string case is reported. `C = MA(C, 10)` is ordinary AFL and must
+    not be flagged, so an assignment counts only when its right-hand side is a
+    string literal or a known string-returning function, or when the name is
+    used as a parameter or a loop counter.
+    """
+    problems = []
+    for path in sorted(ROOT.rglob("*.afl")):
+        code = strip_noise(path.read_text(encoding="utf-8", errors="replace"))
+        rel = path.relative_to(ROOT).as_posix()
+        seen = set()
+
+        def report(name, line, why):
+            if (name.lower(), line) in seen:
+                return
+            seen.add((name.lower(), line))
+            problems.append(
+                "%s:%d  '%s' is AmiBroker's built-in %s array; %s"
+                % (rel, line, name, name.upper(), why)
+            )
+
+        # a parameter or loop counter named after a price array
+        for m in re.finditer(r"\b(?:function|procedure)\s+\w+\s*\(([^)]*)\)", code, re.I):
+            line = code[: m.start()].count("\n") + 1
+            for p in m.group(1).split(","):
+                p = p.strip()
+                if p.lower() in PRICE_ARRAYS:
+                    report(p, line, "using it as a parameter overwrites that array")
+        for m in re.finditer(r"\bfor\s*\(\s*([A-Za-z_]\w*)\s*=", code, re.I):
+            if m.group(1).lower() in PRICE_ARRAYS:
+                report(m.group(1), code[: m.start()].count("\n") + 1,
+                       "using it as a loop counter overwrites that array")
+
+        # assignment whose right-hand side is text
+        for m in re.finditer(r"(?:^|[;{}])\s*([A-Za-z_]\w*)\s*=(?!=)([^;]*)", code, re.M):
+            name, rhs = m.group(1), m.group(2).strip()
+            if name.lower() not in PRICE_ARRAYS:
+                continue
+            fn = re.match(r"([A-Za-z_]\w*)\s*\(", rhs)
+            is_text = rhs.startswith('""') or (fn and fn.group(1).lower() in STRING_FUNCS)
+            if is_text:
+                # Line of the NAME, not of the match: the pattern anchors on the
+                # preceding ';' or '{', which is usually on the line before.
+                report(name, code[: m.start(1)].count("\n") + 1,
+                       "assigning a string to it fails at run time")
+    return problems
+
+
 def main():
     reserved = load_reserved()
     print("checking %s against %d built-in AFL names" % (ROOT.name, len(reserved)))
 
     problems = (check_reserved(reserved) + check_define_before_use(reserved)
-                + check_return_placement())
+                + check_return_placement() + check_price_arrays())
     print()
     if problems:
         for p in problems:
             print("  %s" % p)
         print()
-        print("%d problem(s). Each of these stops the formula from loading." % len(problems))
+        print("%d problem(s). Each of these stops the formula from loading, or "
+              "from running once it has loaded." % len(problems))
         return 1
 
     print("clean -- no reserved-name collisions, every call follows its definition, "
-          "and every return is the last statement of its function.")
+          "every return is the last statement of its function, and no built-in "
+          "price array is used as a variable.")
     return 0
 
 
