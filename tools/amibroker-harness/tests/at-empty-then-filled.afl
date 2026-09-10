@@ -1,0 +1,181 @@
+/*
+* Behaviour test for the empty-then-filled column cache.
+*
+* Seeds the library's own cache directly, so no request is ever made and no
+* order is ever placed. Reads orders while the dataset is EMPTY -- which is
+* what an account looks like before its first order of the day -- and then
+* again once rows have arrived.
+*
+* Before the fix, the lookup while empty cached "there is no such column" and
+* the second read could never resolve it, so the first order of every day
+* could not be read back.
+*
+* Results are written to a file, because the harness does not capture _TRACE.
+*/
+
+#include <autotrader-http.afl>
+
+/*
+* Every check appends here. A static variable rather than a plain one because
+* an AFL function cannot write to a global without declaring it, and the
+* checker below is a function.
+*/
+AT_TEST_LOG_KEY = "SELFTEST_EMPTY_LOG";
+
+StaticVarSetText(AT_TEST_LOG_KEY, "");
+
+/*
+* Records one check and returns 1 when it passed, so the caller can add it up.
+* Both values arrive as text so that numbers and strings read the same way.
+*/
+function atTestCheck(label, actual, expected) {
+	soFar = StaticVarGetText(AT_TEST_LOG_KEY);
+	verdict = 0;
+
+	if(actual == expected) {
+		verdict = 1;
+		StaticVarSetText(AT_TEST_LOG_KEY,
+			soFar + "  ok   " + label + " = " + actual + "\n");
+	} else {
+		StaticVarSetText(AT_TEST_LOG_KEY,
+			soFar + "  FAIL " + label + " = " + actual +
+			"  -- expected " + expected + "\n");
+	}
+
+	return verdict;
+}
+
+testAccount = "SELFTEST_EMPTY";
+passes = 0;
+total = 0;
+
+/*
+* Clear everything this test account cached in an earlier run.
+*
+* A static variable outlives the formula that set it, so without this the
+* first check reads the column position cached by the PREVIOUS run and the
+* test silently passes on state the fix is supposed to create. That is not
+* hypothetical -- it is exactly what happened the first time this ran.
+*/
+StaticVarRemove(AT_HTTP_CACHE_PREFIX + "|" + AT_DS_ORDERS + "|" + testAccount + "*");
+
+/*
+* Step 1: the dataset is EMPTY. The server sends no header at all in that
+* case, so there is nothing for a column name to resolve against.
+*
+* The timestamp is stamped as of now so that atEnsureFresh treats the seeded
+* copy as recent and never reaches the network.
+*/
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "N"), 0);
+StaticVarSetText(atCacheKey(testAccount, AT_DS_ORDERS, "H"), "");
+StaticVarSetText(atCacheKey(testAccount, AT_DS_ORDERS, "ST"), AT_HTTP_EMPTY);
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "TS"), Now(5));
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "LOCK"), 0);
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "LOCKTS"), 0);
+
+total = total + 1;
+passes = passes + atTestCheck("atColumnOf while empty",
+	NumToStr(atColumnOf(testAccount, AT_DS_ORDERS, "ID"), 1.0, False), "0");
+
+total = total + 1;
+passes = passes + atTestCheck("atFindOrder while empty finds nothing",
+	atFindOrder(testAccount, "26091000179573"), "");
+
+/*
+* Step 2: rows arrive. This is the read that was broken -- the cached miss
+* from step 1 used to survive and keep the column unresolvable, so the first
+* order of the day could never be read back.
+*/
+orderHeader = "PSEUDOACCOUNT,TRADINGACCOUNT,PUBLISHERID,ID,EXCHANGEORDERID,VARIETY," +
+	"INDEPENDENTEXCHANGE,INDEPENDENTSYMBOL,TRADETYPE,ORDERTYPE,PRODUCTTYPE,QUANTITY," +
+	"PRICE,TRIGGERPRICE,FILLEDQUANTITY,PENDINGQUANTITY,STATUS,STATUSMESSAGE,VALIDITY," +
+	"AVERAGEPRICE,PARENTORDERID,DISCLOSEDQUANTITY,EXCHANGETIME,PLATFORMTIME,AMO," +
+	"COMMENTS,RAWSTATUS,EXCHANGE,SYMBOL,DAY,PLATFORM,CLIENTID,STOCKBROKER";
+
+orderRow = "SELFTEST_EMPTY,FA0001,,26091000179573,1234,REGULAR,NSE,SBIN,BUY,LIMIT," +
+	"INTRADAY,1,950,0,0,1,OPEN,,DAY,0,,0,,,false,,OPEN,NSE,SBIN-EQ,2026-09-10," +
+	"FINVASIA,FA0001,FINVASIA";
+
+StaticVarSetText(atCacheKey(testAccount, AT_DS_ORDERS, "H"), orderHeader);
+StaticVarSetText(atRowKey(testAccount, AT_DS_ORDERS, 1), orderRow);
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "N"), 1);
+StaticVarSetText(atCacheKey(testAccount, AT_DS_ORDERS, "ST"), AT_HTTP_CSV);
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "TS"), Now(5));
+
+total = total + 1;
+passes = passes + atTestCheck("atColumnOf once rows arrive",
+	NumToStr(atColumnOf(testAccount, AT_DS_ORDERS, "ID"), 1.0, False), "4");
+
+orderHandle = atFindOrder(testAccount, "26091000179573");
+
+total = total + 1;
+passes = passes + atTestCheck("atFindOrder once rows arrive",
+	NumToStr(atFound(orderHandle), 1.0, False), "1");
+
+total = total + 1;
+passes = passes + atTestCheck("order status reads back",
+	atText(orderHandle, "STATUS"), "OPEN");
+
+total = total + 1;
+passes = passes + atTestCheck("order price reads back",
+	atText(orderHandle, "PRICE"), "950");
+
+total = total + 1;
+passes = passes + atTestCheck("order symbol reads back",
+	atText(orderHandle, "INDEPENDENTSYMBOL"), "SBIN");
+
+total = total + 1;
+passes = passes + atTestCheck("unknown field stays blank",
+	atText(orderHandle, "NO_SUCH_FIELD"), "");
+
+/*
+* A column that genuinely is not in a header that DOES exist must still be
+* remembered as missing, otherwise the cache does no work at all. Asked twice
+* on purpose: the second call is the one that reads the remembered answer.
+*/
+total = total + 1;
+passes = passes + atTestCheck("missing column is 0",
+	NumToStr(atColumnOf(testAccount, AT_DS_ORDERS, "NO_SUCH_FIELD"), 1.0, False), "0");
+
+total = total + 1;
+passes = passes + atTestCheck("missing column is still 0 when asked again",
+	NumToStr(atColumnOf(testAccount, AT_DS_ORDERS, "NO_SUCH_FIELD"), 1.0, False), "0");
+
+/*
+* The old numeric getters must be untouched by any of this.
+*/
+total = total + 1;
+passes = passes + atTestCheck("getOrderStatus still works",
+	getOrderStatus(testAccount, "26091000179573"), "OPEN");
+
+/***************************** WRITE THE RESULT ******************************/
+
+summary = "";
+
+if(passes == total) {
+	summary = "SELFTEST-RESULT: PASS " + NumToStr(passes, 1.0, False) + " of " +
+		NumToStr(total, 1.0, False) + "\n";
+} else {
+	summary = "SELFTEST-RESULT: FAIL " + NumToStr(total - passes, 1.0, False) +
+		" of " + NumToStr(total, 1.0, False) + " failed\n";
+}
+
+/*
+* Results go into the harness's own marker file.
+*
+* The harness deletes it before each run and checks for it afterwards, so one
+* file serves as both "execution reached the end" and the detail of what was
+* checked. AFL cannot read an environment variable, so the path is spelled out
+* here -- edit it if this repository lives somewhere else.
+*/
+markerPath = "C:/Users/mhatr/workspace/autotrader-amibroker-lib/tools/amibroker-harness/out/marker.txt";
+markerFile = fopen(markerPath, "w");
+
+if(markerFile) {
+	fputs(StaticVarGetText(AT_TEST_LOG_KEY), markerFile);
+	fputs(summary, markerFile);
+	fclose(markerFile);
+}
+
+Filter = 1;
+AddColumn(Close, "Close");

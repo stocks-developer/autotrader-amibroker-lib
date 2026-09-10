@@ -103,3 +103,30 @@ restart a later run can silently execute an earlier revision's code.
 
 The harness proves the library **loads and runs**. It does not place orders, and it
 cannot prove behaviour on an AmiBroker version other than the one you run it against.
+
+## tests/
+
+`run-test.ps1` on its own answers *does the library load*. The formulas here
+answer *does it behave*, by seeding the library's own cache instead of asking
+the server, so they make no request, need no API key, and place no orders.
+
+```
+powershell -ExecutionPolicy Bypass -File tools/amibroker-harness/run-test.ps1 `
+    -Formula <repo>/tools/amibroker-harness/tests/at-empty-then-filled.afl
+```
+
+Each writes its checks into `out/marker.txt`, so that one file carries both
+"execution reached the end" and what was actually checked. Read it after the
+run; the last line is `SELFTEST-RESULT: PASS n of n`.
+
+> AFL cannot read an environment variable, so each test spells out the absolute
+> path it writes to. Edit that line if this repository lives somewhere else.
+
+**Static variables outlive the formula that set them.** A test that seeds the
+cache must clear its own keys first, or the second run reads what the first one
+left and passes on state it never created. Every test here starts with a
+`StaticVarRemove` of its own prefix for that reason.
+
+| Test | What it pins down |
+|---|---|
+| `at-empty-then-filled.afl` | A dataset that is empty when first read and has rows later. Column names must resolve on the second read — the case that decides whether the first order of the day can be read back. |

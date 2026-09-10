@@ -792,9 +792,18 @@ function atColumnOf(pseudoAccount, dataset, fieldName) {
 		/*
 		* -1 records "looked and it is not there", so a missing column is not
 		* re-scanned on every call. 0 has to stay reserved for "never asked".
+		*
+		* A miss is only worth remembering when there WAS a header to miss in.
+		* An account with no orders yet gets an empty reply, and an empty reply
+		* carries no header at all -- the server has no rows to write one from.
+		* Remembering "not there" at that moment would keep the column
+		* unresolvable for the rest of the session, so the first order placed
+		* afterwards could never be read back.
 		*/
 		if(found == 0) {
-			StaticVarSet(cacheKey, -1);
+			if(header != "") {
+				StaticVarSet(cacheKey, -1);
+			}
 		} else {
 			StaticVarSet(cacheKey, found);
 		}
