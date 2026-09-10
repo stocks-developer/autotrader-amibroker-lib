@@ -542,11 +542,26 @@ function atFetchDataset(pseudoAccount, dataset) {
 function atEnsureFresh(pseudoAccount, dataset) {
 	timeKey = atCacheKey(pseudoAccount, dataset, "TS");
 	statusKey = atCacheKey(pseudoAccount, dataset, "ST");
+	lockKey = atCacheKey(pseudoAccount, dataset, "LOCK");
+	lockTimeKey = atCacheKey(pseudoAccount, dataset, "LOCKTS");
+
+	/*
+	* Single exit, and every early exit carried in "done" instead.
+	*
+	* AFL requires the return statement to be the very last statement of a
+	* function. A return inside an if() is not a runtime problem, it is a
+	* PARSE failure -- "Error 30. Syntax error, unexpected RETURN" -- and it
+	* takes the whole library down with it, because a formula that does not
+	* parse never loads at all. Do not reintroduce early returns here.
+	*/
+	result = "";
+	done = False;
 
 	fetchedAt = Nz(StaticVarGet(timeKey));
 
 	if(fetchedAt > 0 AND DateTimeDiff(Now(5), fetchedAt) < atTtlFor(dataset)) {
-		return StaticVarGetText(statusKey);
+		result = StaticVarGetText(statusKey);
+		done = True;
 	}
 
 	/*
@@ -557,73 +572,83 @@ function atEnsureFresh(pseudoAccount, dataset) {
 	* would arrive as a burst -- the exact shape the server's rate limit exists
 	* to absorb, produced by us.
 	*/
-	lockKey = atCacheKey(pseudoAccount, dataset, "LOCK");
-	lockTimeKey = atCacheKey(pseudoAccount, dataset, "LOCKTS");
+	if(!done) {
+		heldSince = Nz(StaticVarGet(lockTimeKey));
 
-	heldSince = Nz(StaticVarGet(lockTimeKey));
+		if(heldSince > 0) {
+			if(DateTimeDiff(Now(5), heldSince) > AT_HTTP_LOCK_TIMEOUT) {
+				/*
+				* Release a lock nobody is holding any more.
+				*
+				* A static variable outlives the formula that set it, so a chart
+				* stopped or refreshed in the middle of a request never runs its
+				* release. Without this the dataset would be stuck on its last copy
+				* for the rest of the AmiBroker session, silently, and the only
+				* symptom would be numbers that never move.
+				*/
+				StaticVarSet(lockKey, 0);
+				StaticVarSet(lockTimeKey, 0);
+				atHttpTrace("released a stale lock on " + dataset + " for " + pseudoAccount);
 
-	if(heldSince > 0) {
-		if(DateTimeDiff(Now(5), heldSince) > AT_HTTP_LOCK_TIMEOUT) {
-			/*
-			* Release a lock nobody is holding any more.
-			*
-			* A static variable outlives the formula that set it, so a chart
-			* stopped or refreshed in the middle of a request never runs its
-			* release. Without this the dataset would be stuck on its last copy
-			* for the rest of the AmiBroker session, silently, and the only
-			* symptom would be numbers that never move.
-			*/
-			StaticVarSet(lockKey, 0);
-			StaticVarSet(lockTimeKey, 0);
-			atHttpTrace("released a stale lock on " + dataset + " for " + pseudoAccount);
-
-		} else {
-			/*
-			* Somebody is fetching this right now. Return immediately with what
-			* we already have -- do NOT queue behind them.
-			*
-			* This branch is why the wait below is almost never reached, and it
-			* has to come first. tryEnterCriticalSection spins for up to a full
-			* second before giving up, and atEnsureFresh runs on EVERY get...()
-			* call: a strategy reading twenty fields while another chart holds
-			* the lock would otherwise stall for twenty seconds, once per bar.
-			*/
-			return StaticVarGetText(statusKey);
+			} else {
+				/*
+				* Somebody is fetching this right now. Give back what we already
+				* have -- do NOT queue behind them.
+				*
+				* This branch is why the wait below is almost never reached, and it
+				* has to come first. tryEnterCriticalSection spins for up to a full
+				* second before giving up, and atEnsureFresh runs on EVERY get...()
+				* call: a strategy reading twenty fields while another chart holds
+				* the lock would otherwise stall for twenty seconds, once per bar.
+				*/
+				result = StaticVarGetText(statusKey);
+				done = True;
+			}
 		}
 	}
 
 	/*
 	* Still guarded, for the narrow window between the check above and the
 	* winner stamping its lock time.
+	*
+	* Nested rather than "if(!done AND !tryEnterCriticalSection(lockKey))" on
+	* purpose: AFL's AND does not short circuit, so the combined form would
+	* take the lock even on the paths that already finished -- and nothing
+	* below would ever release it.
 	*/
-	if(!tryEnterCriticalSection(lockKey)) {
-		return StaticVarGetText(statusKey);
+	if(!done) {
+		if(!tryEnterCriticalSection(lockKey)) {
+			result = StaticVarGetText(statusKey);
+			done = True;
+		}
 	}
 
-	StaticVarSet(lockTimeKey, Now(5));
+	if(!done) {
+		StaticVarSet(lockTimeKey, Now(5));
 
-	/* Re-check: another chart may have refreshed while we waited for the lock. */
-	fetchedAt = Nz(StaticVarGet(timeKey));
+		/* Re-check: another chart may have refreshed while we waited for the lock. */
+		fetchedAt = Nz(StaticVarGet(timeKey));
 
-	if(fetchedAt > 0 AND DateTimeDiff(Now(5), fetchedAt) < atTtlFor(dataset)) {
+		if(fetchedAt > 0 AND DateTimeDiff(Now(5), fetchedAt) < atTtlFor(dataset)) {
+			result = StaticVarGetText(statusKey);
+
+		} else {
+			result = atFetchDataset(pseudoAccount, dataset);
+
+			/*
+			* Stamped on failure too. A chart that cannot reach the server must
+			* not retry on every get...() call -- that is hundreds of hanging
+			* requests a bar, produced exactly when the network is already
+			* struggling.
+			*/
+			StaticVarSet(timeKey, Now(5));
+		}
+
 		StaticVarSet(lockTimeKey, 0);
 		leaveCriticalSection();
-		return StaticVarGetText(statusKey);
 	}
 
-	httpStatus = atFetchDataset(pseudoAccount, dataset);
-
-	/*
-	* Stamped on failure too. A chart that cannot reach the server must not
-	* retry on every get...() call -- that is hundreds of hanging requests a
-	* bar, produced exactly when the network is already struggling.
-	*/
-	StaticVarSet(timeKey, Now(5));
-
-	StaticVarSet(lockTimeKey, 0);
-	leaveCriticalSection();
-
-	return httpStatus;
+	return result;
 }
 
 /**
@@ -745,29 +770,33 @@ function atSendCommand(csv) {
 function atRunCommand(csv, description) {
 	httpStatus = atSendCommand(csv);
 
+	/* Single exit -- see atEnsureFresh. A return inside an if() will not parse. */
+	result = False;
+
 	if(httpStatus == AT_HTTP_OK) {
 		message = description + " done.";
 		logDebug(message);
 		_TRACE(message);
-		return True;
-	}
+		result = True;
 
-	message = "SD-ERR-AB-CMD: " + description + " failed [" + httpStatus + "] " + atHttpMessage;
-	logError(message);
-	_TRACE(message);
-
-	if(atHttpAction == AT_ACTION_CHECK) {
-		/*
-		* The request reached the broker and was never confirmed. Reporting
-		* False is right -- we did not see it succeed -- but a bare False would
-		* let a strategy quietly assume nothing happened, and something may
-		* well have.
-		*/
-		message = "SD-ERR-AB-CMD: " + description +
-			" may still have gone through. Check your order book before repeating it.";
+	} else {
+		message = "SD-ERR-AB-CMD: " + description + " failed [" + httpStatus + "] " + atHttpMessage;
 		logError(message);
 		_TRACE(message);
+
+		if(atHttpAction == AT_ACTION_CHECK) {
+			/*
+			* The request reached the broker and was never confirmed. Reporting
+			* False is right -- we did not see it succeed -- but a bare False would
+			* let a strategy quietly assume nothing happened, and something may
+			* well have.
+			*/
+			message = "SD-ERR-AB-CMD: " + description +
+				" may still have gone through. Check your order book before repeating it.";
+			logError(message);
+			_TRACE(message);
+		}
 	}
 
-	return False;
+	return result;
 }
