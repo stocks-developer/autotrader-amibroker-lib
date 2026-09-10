@@ -71,6 +71,25 @@ orderId = placeOrder(AT_ACCOUNT, AT_EXCHANGE, AT_SYMBOL,
 
 Ready-made sample AFLs (regular / bracket / cover orders, scanners, button trading and multi-account trading) install under `Formulas\AutoTraderWeb`.
 
+### Which AmiBroker version we test on
+
+We test this library on **AmiBroker 6.93, 64-bit**. It needs AmiBroker 6.30 or newer.
+
+AmiBroker changes what it accepts from one version to the next. If you are on a higher or lower version and something does not work, [contact us](https://stocksdeveloper.in/contact/) and tell us your AmiBroker version. We will look at it.
+
+### Reading an order back after you place or change it
+
+An order does not update the instant you place, modify or cancel it. Your broker's order book takes a few seconds to catch up, and the library re-uses portfolio data for a couple of seconds so that a busy chart does not send the same request twenty times.
+
+So this reads the values from **before** the change:
+
+```c
+orderId = placeOrder(...);
+status = getOrderStatus(AT_ACCOUNT, orderId);   // asked too soon
+```
+
+Read the order on a later bar, or a few seconds later. Blank or unchanged values straight after a change mean "not updated yet". They do not mean the order failed.
+
 Full step-by-step guide: **[AmiBroker library setup](https://stocksdeveloper.in/documentation/client-setup/amibroker-library/)**. See also [multi-account button trading](https://stocksdeveloper.in/amibroker-multi-account-button-trading/). Get your API key from your [account settings](https://webx.stocksdeveloper.in/register).
 
 ## Open-source AmiBroker utilities

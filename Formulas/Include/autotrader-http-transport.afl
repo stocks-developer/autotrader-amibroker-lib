@@ -181,6 +181,23 @@ function atPipeField(line, index) {
 		}
 	}
 
+	/*
+	* The last field carries the line ending. InternetReadString hands back
+	* each line WITH its newline -- AmiBroker's own documentation says so and
+	* tells you to trim it -- and the reply to a command is a single line, so
+	* the final field ends with one.
+	*
+	* It matters because that field is the broker's order id. An untrimmed id
+	* is still returned by placeOrder() and still looks right when printed, but
+	* every getOrderStatus()/getOrderPrice() call made with it silently returns
+	* blank, because no row matches an id with a newline stuck to it.
+	*
+	* The CSV path never had this problem: atStoreRows strips carriage returns
+	* and splits on the newline, so a row is already clean by the time
+	* atCsvField sees it.
+	*/
+	result = StrTrim(result, "");
+
 	return result;
 }
 
