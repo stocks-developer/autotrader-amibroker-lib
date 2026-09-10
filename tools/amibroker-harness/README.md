@@ -130,3 +130,33 @@ left and passes on state it never created. Every test here starts with a
 | Test | What it pins down |
 |---|---|
 | `at-empty-then-filled.afl` | A dataset that is empty when first read and has rows later. Column names must resolve on the second read — the case that decides whether the first order of the day can be read back. |
+
+## Two things about AmiBroker itself that cost a session each
+
+Neither is about this harness, and both are invisible until they waste your time.
+
+### _TRACE output is OFF until you switch it on
+
+`_TRACE()` writes nothing to the Log window by default. Turn it on by
+**right-clicking inside the Log window -> Trace Output -> tick "Internal"**.
+
+Until you do, the Trace tab stays empty however well the formula is running, and
+AmiBroker says so only in a placeholder line that the column width truncates to
+`NOTE: Internal _TRACE() output is ...`. Read in full it says *"is NOT enabled.
+Please use context menu to enable."*
+
+Our own sample AFLs told users to open the Trace tab and stop there, so anyone
+following them exactly concluded the library was dead. Fixed 2026-09-10.
+
+### Dragging a formula onto a chart SNAPSHOTS it
+
+Dragging `Formulas\...\X.afl` onto a chart writes a **copy** to
+`Formulas\Drag-drop\X N.afl`, and the pane runs that copy. Editing the original
+afterwards changes nothing on screen, and **F5 does not help**.
+
+So after any edit the chart must be re-created, not refreshed. A stale pane also
+keeps throwing its old error into the Log window, which reads as though the fix
+did not work.
+
+Seen 2026-09-10 with two copies of one formula live at once: `X 1.afl` still
+failing on a bug that `X 2.afl` had fixed.
