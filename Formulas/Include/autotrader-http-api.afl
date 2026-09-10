@@ -407,9 +407,9 @@ function placeOrderAdvanced(variety, account, exchange, symbol,
 			_TRACE(message);
 		}
 
-		status = atSendCommand(csv);
+		httpStatus = atSendCommand(csv);
 
-		if(status == AT_HTTP_OK) {
+		if(httpStatus == AT_HTTP_OK) {
 			orderId = atPipeField(atHttpResponse, 2);
 
 			saveLastOrderTradeType(account, symbol, tradeType);

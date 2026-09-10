@@ -367,16 +367,16 @@ procedure atRecordError(response) {
 * asked for again. A command that did not arrive may in fact have arrived, with
 * only the answer lost -- so it is CHECK, and the caller must not resend it.
 */
-procedure atRecordStatus(status, response, isCommand) {
+procedure atRecordStatus(httpStatus, response, isCommand) {
 	global atHttpMessage;
 	global atHttpAction;
 
-	if(status == AT_HTTP_ERROR) {
+	if(httpStatus == AT_HTTP_ERROR) {
 		atRecordError(response);
-	} else if(status == AT_HTTP_AUTH) {
+	} else if(httpStatus == AT_HTTP_AUTH) {
 		atHttpAction = AT_ACTION_USER;
 		atHttpMessage = "API key was not accepted. Check AT_API_KEY in autotrader-http-config.afl.";
-	} else if(status == AT_HTTP_UNREACHABLE) {
+	} else if(httpStatus == AT_HTTP_UNREACHABLE) {
 		if(isCommand) {
 			atHttpAction = AT_ACTION_CHECK;
 			atHttpMessage = "No usable reply from " + AT_BASE_URL +
@@ -496,13 +496,13 @@ function atFetchDataset(pseudoAccount, dataset) {
 	atHttpTrace("reading " + dataset + " for " + pseudoAccount);
 
 	response = atHttpPost("/csv/" + dataset, postBody);
-	status = atClassify(response, False);
-	atRecordStatus(status, response, False);
+	httpStatus = atClassify(response, False);
+	atRecordStatus(httpStatus, response, False);
 
 	countKey = atCacheKey(pseudoAccount, dataset, "N");
 	previous = Nz(StaticVarGet(countKey));
 
-	if(status == AT_HTTP_CSV) {
+	if(httpStatus == AT_HTTP_CSV) {
 		rows = atStoreRows(pseudoAccount, dataset, response);
 		StaticVarSet(countKey, rows);
 
@@ -512,7 +512,7 @@ function atFetchDataset(pseudoAccount, dataset) {
 
 		atHttpTrace(dataset + ": " + NumToStr(rows, 1.0, False) + " rows");
 
-	} else if(status == AT_HTTP_EMPTY) {
+	} else if(httpStatus == AT_HTTP_EMPTY) {
 		/* A real answer: this account has nothing in this dataset right now. */
 		StaticVarSet(countKey, 0);
 		atDropRows(pseudoAccount, dataset, 1, previous);
@@ -521,14 +521,14 @@ function atFetchDataset(pseudoAccount, dataset) {
 
 	} else {
 		message = "SD-ERR-AB-READ: " + dataset + " for " + pseudoAccount +
-			" failed [" + status + "] " + atHttpMessage;
+			" failed [" + httpStatus + "] " + atHttpMessage;
 		logError(message);
 		_TRACE(message);
 	}
 
-	StaticVarSetText(atCacheKey(pseudoAccount, dataset, "ST"), status);
+	StaticVarSetText(atCacheKey(pseudoAccount, dataset, "ST"), httpStatus);
 
-	return status;
+	return httpStatus;
 }
 
 /**
@@ -611,7 +611,7 @@ function atEnsureFresh(pseudoAccount, dataset) {
 		return StaticVarGetText(statusKey);
 	}
 
-	status = atFetchDataset(pseudoAccount, dataset);
+	httpStatus = atFetchDataset(pseudoAccount, dataset);
 
 	/*
 	* Stamped on failure too. A chart that cannot reach the server must not
@@ -623,7 +623,7 @@ function atEnsureFresh(pseudoAccount, dataset) {
 	StaticVarSet(lockTimeKey, 0);
 	leaveCriticalSection();
 
-	return status;
+	return httpStatus;
 }
 
 /**
@@ -726,12 +726,12 @@ function atSendCommand(csv) {
 	atHttpTrace("command: " + csv);
 
 	atHttpResponse = atHttpPost("/csv/command", postBody);
-	status = atClassify(atHttpResponse, True);
-	atRecordStatus(status, atHttpResponse, True);
+	httpStatus = atClassify(atHttpResponse, True);
+	atRecordStatus(httpStatus, atHttpResponse, True);
 
 	atHttpTrace("reply: " + atHttpResponse);
 
-	return status;
+	return httpStatus;
 }
 
 /**
@@ -743,16 +743,16 @@ function atSendCommand(csv) {
 * way anyone finds out is the log.
 */
 function atRunCommand(csv, description) {
-	status = atSendCommand(csv);
+	httpStatus = atSendCommand(csv);
 
-	if(status == AT_HTTP_OK) {
+	if(httpStatus == AT_HTTP_OK) {
 		message = description + " done.";
 		logDebug(message);
 		_TRACE(message);
 		return True;
 	}
 
-	message = "SD-ERR-AB-CMD: " + description + " failed [" + status + "] " + atHttpMessage;
+	message = "SD-ERR-AB-CMD: " + description + " failed [" + httpStatus + "] " + atHttpMessage;
 	logError(message);
 	_TRACE(message);
 
