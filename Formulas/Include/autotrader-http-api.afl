@@ -265,7 +265,221 @@ function readMarginColumn(pseudoAccount, category, columnIndex) {
 * Reads holdings and returns a column value for the given symbol.
 */
 function readHoldingColumn(pseudoAccount, symbol, columnIndex) {
-	return atReadColumn(pseudoAccount, AT_DS_HOLDINGS, symbol, 5, columnIndex);
+	/*
+	* Match on the INDEPENDENT symbol, by name.
+	*
+	* This used to match column 5, copied across from the file based library.
+	* In the file the Desktop Client wrote, column 5 was the independent symbol.
+	* In the server's holdings CSV column 5 is the BROKER symbol -- "IOC-EQ"
+	* where the caller passes "IOC" -- so every holding getter matched nothing
+	* and returned 0 or blank for an account that did hold the stock. Nothing in
+	* the code showed it, because 0 is also the honest answer for a stock you do
+	* not hold.
+	*
+	* Holdings are the one dataset with no single INDEPENDENTSYMBOL column; they
+	* carry one per exchange. The getters take no exchange, so try NSE and then
+	* BSE.
+	*/
+	row = atFindRowByName(pseudoAccount, AT_DS_HOLDINGS, "INDEPENDENTSYMBOLNSE", symbol);
+
+	if(row == 0) {
+		row = atFindRowByName(pseudoAccount, AT_DS_HOLDINGS, "INDEPENDENTSYMBOLBSE", symbol);
+	}
+
+	result = "";
+
+	if(row > 0) {
+		result = atReadRowColumn(pseudoAccount, AT_DS_HOLDINGS, row, columnIndex);
+	}
+
+	return result;
+}
+
+/*****************************************************************************
+*
+* PORTFOLIO BY NAME -- the recommended way to read a portfolio.
+*
+* The get...() functions below this section still work and are not going away.
+* They come from the file based library, so each one takes the whole identity
+* of a row and looks that row up again, and each one addresses its field by a
+* column NUMBER. Twenty fields means twenty lookups, and a column number is
+* only correct until the server's CSV changes shape.
+*
+* These read by NAME instead, and find the row once:
+*
+*     h = atFindHolding(AT_ACCOUNT, "NSE", "IOC");
+*     if(atFound(h)) {
+*         qty  = atNum(h, "QUANTITY");
+*         isin = atText(h, "ISIN");
+*     }
+*
+* atFound() matters. A holding you do not have and a lookup that is broken both
+* read as 0, and telling them apart is exactly what was missing when the bug
+* above went unnoticed.
+*
+* Field names are the column names in the server's CSV header, case does not
+* matter: QUANTITY, PNL, ISIN, PRODUCT, LTP, AVGPRICE, STATUS, TRADETYPE,
+* NETQUANTITY, BUYAVGPRICE, and so on. An unknown name returns blank rather
+* than the wrong field.
+*
+*****************************************************************************/
+
+/*
+* A row handle: which account, which dataset, which row. Held as text so it can
+* be passed around like any other AFL value.
+*/
+function atHandle(pseudoAccount, dataset, row) {
+	return pseudoAccount + AT_PIPE + dataset + AT_PIPE + NumToStr(row, 1.0, False);
+}
+
+/*
+* True when a find...() actually found something.
+*/
+function atFound(handle) {
+	return handle != "";
+}
+
+/*
+* One field of a found row, as text. Blank for an unknown field or a handle
+* that found nothing.
+*/
+function atText(handle, fieldName) {
+	result = "";
+
+	if(handle != "") {
+		result = atFieldByName(atPipeField(handle, 1), atPipeField(handle, 2),
+			StrToNum(atPipeField(handle, 3)), fieldName);
+	}
+
+	return result;
+}
+
+/*
+* The same, as a number.
+*/
+function atNum(handle, fieldName) {
+	return StrToNum(atText(handle, fieldName));
+}
+
+/*
+* Finds one holding. Exchange decides which independent symbol column is
+* matched, so BSE holdings are addressable too.
+*/
+function atFindHolding(pseudoAccount, exchange, symbol) {
+	field = "INDEPENDENTSYMBOLNSE";
+
+	if(StrToUpper(exchange) == "BSE") {
+		field = "INDEPENDENTSYMBOLBSE";
+	}
+
+	row = atFindRowByName(pseudoAccount, AT_DS_HOLDINGS, field, symbol);
+	result = "";
+
+	if(row > 0) {
+		result = atHandle(pseudoAccount, AT_DS_HOLDINGS, row);
+	}
+
+	return result;
+}
+
+/*
+* Finds one order by the broker's order id -- what placeOrder() returns.
+*/
+function atFindOrder(pseudoAccount, orderId) {
+	row = atFindRowByName(pseudoAccount, AT_DS_ORDERS, "ID", orderId);
+	result = "";
+
+	if(row > 0) {
+		result = atHandle(pseudoAccount, AT_DS_ORDERS, row);
+	}
+
+	return result;
+}
+
+/*
+* Finds one position. A position has no id of its own, so it is identified by
+* category, type, exchange and symbol together.
+*/
+function atFindPosition(pseudoAccount, category, type, exchange, symbol) {
+	row = atFindRowByName4(pseudoAccount, AT_DS_POSITIONS,
+		"CATEGORY", category, "TYPE", type,
+		"INDEPENDENTEXCHANGE", exchange, "INDEPENDENTSYMBOL", symbol);
+
+	result = "";
+
+	if(row > 0) {
+		result = atHandle(pseudoAccount, AT_DS_POSITIONS, row);
+	}
+
+	return result;
+}
+
+/*
+* Finds one margin category: EQUITY, COMMODITY or ALL.
+*/
+function atFindMargin(pseudoAccount, category) {
+	row = atFindRowByName(pseudoAccount, AT_DS_MARGINS, "CATEGORY", category);
+	result = "";
+
+	if(row > 0) {
+		result = atHandle(pseudoAccount, AT_DS_MARGINS, row);
+	}
+
+	return result;
+}
+
+/*
+* How many rows a portfolio holds, and the n-th of them, 1 based.
+*
+* There was no way to WALK a portfolio before: every getter needed a symbol you
+* already knew, so a strategy could not ask "what am I holding?" or "what is
+* still open?". These make that possible:
+*
+*     for( i = 1; i <= atPositionCount(AT_ACCOUNT); i++ ) {
+*         p = atPositionAt(AT_ACCOUNT, i);
+*         _TRACE( atText(p, "INDEPENDENTSYMBOL") + " " + atText(p, "NETQUANTITY") );
+*     }
+*/
+function atHoldingCount(pseudoAccount) {
+	return atRowCount(pseudoAccount, AT_DS_HOLDINGS);
+}
+
+function atPositionCount(pseudoAccount) {
+	return atRowCount(pseudoAccount, AT_DS_POSITIONS);
+}
+
+function atOrderCount(pseudoAccount) {
+	return atRowCount(pseudoAccount, AT_DS_ORDERS);
+}
+
+function atHoldingAt(pseudoAccount, n) {
+	result = "";
+
+	if(n >= 1 AND n <= atRowCount(pseudoAccount, AT_DS_HOLDINGS)) {
+		result = atHandle(pseudoAccount, AT_DS_HOLDINGS, n);
+	}
+
+	return result;
+}
+
+function atPositionAt(pseudoAccount, n) {
+	result = "";
+
+	if(n >= 1 AND n <= atRowCount(pseudoAccount, AT_DS_POSITIONS)) {
+		result = atHandle(pseudoAccount, AT_DS_POSITIONS, n);
+	}
+
+	return result;
+}
+
+function atOrderAt(pseudoAccount, n) {
+	result = "";
+
+	if(n >= 1 AND n <= atRowCount(pseudoAccount, AT_DS_ORDERS)) {
+		result = atHandle(pseudoAccount, AT_DS_ORDERS, n);
+	}
+
+	return result;
 }
 
 /*****************************************************************************/

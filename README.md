@@ -77,6 +77,47 @@ We test this library on **AmiBroker 6.93, 64-bit**. It needs AmiBroker 6.30 or n
 
 AmiBroker changes what it accepts from one version to the next. If you are on a higher or lower version and something does not work, [contact us](https://stocksdeveloper.in/contact/) and tell us your AmiBroker version. We will look at it.
 
+### Reading your portfolio
+
+Find the row once, then read its fields by name:
+
+```c
+holdRow = atFindHolding(AT_ACCOUNT, "NSE", "IOC");
+
+if(atFound(holdRow))
+{
+    qty  = atNum(holdRow, "QUANTITY");
+    isin = atText(holdRow, "ISIN");
+}
+```
+
+There is a finder for each kind of row:
+
+| Finder | Identified by |
+|---|---|
+| `atFindHolding(account, exchange, symbol)` | exchange and symbol |
+| `atFindPosition(account, category, type, exchange, symbol)` | all four together |
+| `atFindOrder(account, orderId)` | the broker's order id |
+| `atFindMargin(account, category)` | `EQUITY`, `COMMODITY` or `ALL` |
+
+`atFound()` tells you whether the row exists. This matters: a holding you do not have and a lookup that went wrong both read as `0`, and only `atFound()` separates them.
+
+Field names are the column names your data already uses, and case does not matter — `QUANTITY`, `PNL`, `LTP`, `AVGPRICE`, `ISIN`, `STATUS`, `TRADETYPE`, `NETQUANTITY`, `BUYAVGPRICE` and so on. Ask for a name that does not exist and you get a blank, never a different field by mistake.
+
+You can also walk the whole portfolio, which the older functions cannot do:
+
+```c
+for(i = 1; i <= atPositionCount(AT_ACCOUNT); i++)
+{
+    p = atPositionAt(AT_ACCOUNT, i);
+    _TRACE(atText(p, "INDEPENDENTSYMBOL") + " " + atText(p, "NETQUANTITY"));
+}
+```
+
+`atHoldingCount()` / `atHoldingAt()` and `atOrderCount()` / `atOrderAt()` work the same way.
+
+The older `getHoldingQuantity()`, `getPositionNetQuantity()`, `getOrderStatus()` style functions still work exactly as before and are not going away. Use these when you want to read several fields of the same row, or when you need to go through a portfolio without knowing the symbols in advance.
+
 ### Reading an order back after you place or change it
 
 An order does not update the instant you place, modify or cancel it. Your broker's order book takes a few seconds to catch up, and the library re-uses portfolio data for a couple of seconds so that a busy chart does not send the same request twenty times.

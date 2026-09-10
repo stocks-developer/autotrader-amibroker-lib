@@ -94,6 +94,15 @@ AT_HTTP_HEX = "0123456789ABCDEF";
 AT_HTTP_QUOTE = "\"";
 
 /*
+* How far to read along the header when resolving a column name.
+*
+* The widest dataset the server sends is orders, at 33 columns, so this is
+* generous. It is only a stop so that a malformed header cannot spin a chart:
+* the scan ends at the first empty column anyway.
+*/
+AT_HTTP_MAX_COLUMNS = 60;
+
+/*
 * Set by atHttpPost(): False when the request never left the machine at all.
 *
 * Needed because an unreachable server and an account with no orders both hand
@@ -472,10 +481,22 @@ function atStoreRows(pseudoAccount, dataset, body) {
 			rest = "";
 		}
 
-		/* i == 0 is the header row. */
-		if(i > 0 AND line != "") {
-			rows++;
-			StaticVarSetText(atRowKey(pseudoAccount, dataset, rows), line);
+		/*
+		* Row 0 is the header, and it is KEPT rather than discarded.
+		*
+		* It names every column, which is what lets a lookup ask for
+		* "QUANTITY" instead of counting to seven. Throwing it away is what
+		* made the holdings getters read the broker symbol column while the
+		* caller passed an independent symbol -- a silent wrong answer that
+		* no amount of reading the code would show.
+		*/
+		if(i == 0) {
+			StaticVarSetText(atCacheKey(pseudoAccount, dataset, "H"), line);
+		} else {
+			if(line != "") {
+				rows++;
+				StaticVarSetText(atRowKey(pseudoAccount, dataset, rows), line);
+			}
 		}
 
 		if(rest == "") {
@@ -725,6 +746,70 @@ function atReadColumn4(pseudoAccount, dataset,
 }
 
 /**
+* Position of a named column in a dataset, 1 based. 0 when there is no such
+* column.
+*
+* This is the whole point of keeping the header. Every lookup in the library
+* goes through a NAME, so a change to the server's column order cannot quietly
+* make a getter return the wrong field -- the worst it can do is return 0 here,
+* which is visible.
+*
+* The answer is cached per account and dataset, because a strategy may ask for
+* twenty fields on every bar and re-scanning the header each time would be
+* twenty scans for an answer that never changes within a session.
+*
+* Names are compared without regard to case, so "quantity" and "QUANTITY" are
+* the same column.
+*/
+function atColumnOf(pseudoAccount, dataset, fieldName) {
+	cacheKey = atCacheKey(pseudoAccount, dataset, "C" + StrToUpper(fieldName));
+	cached = Nz(StaticVarGet(cacheKey));
+	result = 0;
+
+	if(cached == 0) {
+		/* Not looked up yet in this session. */
+		header = StaticVarGetText(atCacheKey(pseudoAccount, dataset, "H"));
+		wanted = StrToUpper(StrTrim(fieldName, ""));
+		found = 0;
+		done = False;
+
+		for(i = 1; i <= AT_HTTP_MAX_COLUMNS; i++) {
+			if(!done) {
+				colName = StrToUpper(StrTrim(atCsvField(header, i), ""));
+
+				if(colName == "") {
+					/* Past the end of the header. */
+					done = True;
+				} else {
+					if(colName == wanted) {
+						found = i;
+						done = True;
+					}
+				}
+			}
+		}
+
+		/*
+		* -1 records "looked and it is not there", so a missing column is not
+		* re-scanned on every call. 0 has to stay reserved for "never asked".
+		*/
+		if(found == 0) {
+			StaticVarSet(cacheKey, -1);
+		} else {
+			StaticVarSet(cacheKey, found);
+		}
+
+		result = found;
+	} else {
+		if(cached > 0) {
+			result = cached;
+		}
+	}
+
+	return result;
+}
+
+/**
 * Number of rows currently held for a dataset. Refreshes first.
 */
 function atRowCount(pseudoAccount, dataset) {
@@ -746,6 +831,113 @@ function atReadRowColumn(pseudoAccount, dataset, row, column) {
 	}
 
 	return result;
+}
+
+/**
+* One field of one row, addressed by column NAME. Blank when the dataset has no
+* such column or the row is out of range.
+*
+* Defined here, after atRowCount and atReadRowColumn, because AFL is read top
+* to bottom and a function must appear before the line that calls it.
+*/
+function atFieldByName(pseudoAccount, dataset, row, fieldName) {
+	column = atColumnOf(pseudoAccount, dataset, fieldName);
+	result = "";
+
+	if(column > 0) {
+		result = atReadRowColumn(pseudoAccount, dataset, row, column);
+	}
+
+	return result;
+}
+
+/**
+* The first row whose named column equals a value, as a row number. 0 when
+* nothing matches.
+*/
+function atFindRowByName(pseudoAccount, dataset, fieldName, value) {
+	total = atRowCount(pseudoAccount, dataset);
+	column = atColumnOf(pseudoAccount, dataset, fieldName);
+	found = 0;
+	done = False;
+
+	for(i = 1; i <= total; i++) {
+		if(!done) {
+			if(column > 0) {
+				if(value == atReadRowColumn(pseudoAccount, dataset, i, column)) {
+					found = i;
+					done = True;
+				}
+			}
+		}
+	}
+
+	return found;
+}
+
+/**
+* The first row matching TWO named columns at once. 0 when nothing matches.
+*/
+function atFindRowByName2(pseudoAccount, dataset,
+	field1, value1, field2, value2) {
+
+	total = atRowCount(pseudoAccount, dataset);
+	col1 = atColumnOf(pseudoAccount, dataset, field1);
+	col2 = atColumnOf(pseudoAccount, dataset, field2);
+	found = 0;
+	done = False;
+
+	for(i = 1; i <= total; i++) {
+		if(!done) {
+			if(col1 > 0 AND col2 > 0) {
+				if(value1 == atReadRowColumn(pseudoAccount, dataset, i, col1)) {
+					if(value2 == atReadRowColumn(pseudoAccount, dataset, i, col2)) {
+						found = i;
+						done = True;
+					}
+				}
+			}
+		}
+	}
+
+	return found;
+}
+
+/**
+* The first row matching FOUR named columns at once.
+*
+* A position has no id of its own -- it is identified by category, type,
+* exchange and symbol together.
+*/
+function atFindRowByName4(pseudoAccount, dataset,
+	field1, value1, field2, value2, field3, value3, field4, value4) {
+
+	total = atRowCount(pseudoAccount, dataset);
+	col1 = atColumnOf(pseudoAccount, dataset, field1);
+	col2 = atColumnOf(pseudoAccount, dataset, field2);
+	col3 = atColumnOf(pseudoAccount, dataset, field3);
+	col4 = atColumnOf(pseudoAccount, dataset, field4);
+	found = 0;
+	done = False;
+
+	for(i = 1; i <= total; i++) {
+		if(!done) {
+			if(col1 > 0 AND col2 > 0 AND col3 > 0 AND col4 > 0) {
+				if(value1 == atReadRowColumn(pseudoAccount, dataset, i, col1)) {
+					if(value2 == atReadRowColumn(pseudoAccount, dataset, i, col2)) {
+						if(value3 == atReadRowColumn(pseudoAccount, dataset, i, col3)) {
+							if(value4 == atReadRowColumn(pseudoAccount, dataset, i, col4)) {
+								found = i;
+								done = True;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return found;
 }
 
 /******************************** COMMANDS ***********************************/
