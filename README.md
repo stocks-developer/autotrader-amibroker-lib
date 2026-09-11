@@ -145,7 +145,7 @@ for(i = 1; i <= atPositionCount(AT_ACCOUNT); i++)
 
 `atHoldingCount()` / `atHoldingAt()` and `atOrderCount()` / `atOrderAt()` work the same way.
 
-**Rows are numbered from 1, not from 0.** Start the loop at `1` and end it at `<= count`, exactly as above. A loop written `for(i = 0; i < count; i++)` out of C habit reads nothing at all for `i = 0` and never reaches the last row — and it does that silently, with no error, so it looks like missing data rather than a mistake in the loop.
+**Rows are numbered from 1, not from 0.** Start the loop at `1` and end it at `<= count`, exactly as above. A loop written `for(i = 0; i < count; i++)` out of C habit reads nothing for `i = 0` and never reaches the last row. Asking for a row that does not exist returns an empty row and writes `SD-ERR-AB-ROW` to the log and to AmiBroker's trace output, naming the function, the row you asked for and how many rows there are. So a loop mistake shows up in the log instead of looking like missing data.
 
 The older `getHoldingQuantity()`, `getPositionNetQuantity()`, `getOrderStatus()` style functions still work exactly as before and are not going away. Use these when you want to read several fields of the same row, or when you need to go through a portfolio without knowing the symbols in advance.
 

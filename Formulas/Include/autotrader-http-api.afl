@@ -439,6 +439,8 @@ function atFindMargin(pseudoAccount, category) {
 *         p = atPositionAt(AT_ACCOUNT, i);
 *         _TRACE( atText(p, "INDEPENDENTSYMBOL") + " " + atText(p, "NETQUANTITY") );
 *     }
+*
+* A row number outside 1..count returns an empty row and logs SD-ERR-AB-ROW.
 */
 function atHoldingCount(pseudoAccount) {
 	return atRowCount(pseudoAccount, AT_DS_HOLDINGS);
@@ -452,11 +454,31 @@ function atOrderCount(pseudoAccount) {
 	return atRowCount(pseudoAccount, AT_DS_ORDERS);
 }
 
+/*
+* A row number outside 1..count is a mistake in the loop that asked for it, not
+* missing data, so it is reported rather than passed back quietly as an empty row.
+*/
+procedure atReportMissingRow(functionName, pseudoAccount, n, rowCount) {
+	if(rowCount > 0) {
+		rowRange = "Rows are numbered from 1 to " + NumToStr(rowCount, 1.0, False) + ".";
+	} else {
+		rowRange = "There are no rows.";
+	}
+
+	message = "SD-ERR-AB-ROW: " + functionName + "(" + pseudoAccount + ", "
+		+ NumToStr(n, 1.0, False) + ") asked for a row that does not exist. " + rowRange;
+	logError(message);
+	_TRACE(message);
+}
+
 function atHoldingAt(pseudoAccount, n) {
 	result = "";
+	rowCount = atRowCount(pseudoAccount, AT_DS_HOLDINGS);
 
-	if(n >= 1 AND n <= atRowCount(pseudoAccount, AT_DS_HOLDINGS)) {
+	if(n >= 1 AND n <= rowCount) {
 		result = atHandle(pseudoAccount, AT_DS_HOLDINGS, n);
+	} else {
+		atReportMissingRow("atHoldingAt", pseudoAccount, n, rowCount);
 	}
 
 	return result;
@@ -464,9 +486,12 @@ function atHoldingAt(pseudoAccount, n) {
 
 function atPositionAt(pseudoAccount, n) {
 	result = "";
+	rowCount = atRowCount(pseudoAccount, AT_DS_POSITIONS);
 
-	if(n >= 1 AND n <= atRowCount(pseudoAccount, AT_DS_POSITIONS)) {
+	if(n >= 1 AND n <= rowCount) {
 		result = atHandle(pseudoAccount, AT_DS_POSITIONS, n);
+	} else {
+		atReportMissingRow("atPositionAt", pseudoAccount, n, rowCount);
 	}
 
 	return result;
@@ -474,9 +499,12 @@ function atPositionAt(pseudoAccount, n) {
 
 function atOrderAt(pseudoAccount, n) {
 	result = "";
+	rowCount = atRowCount(pseudoAccount, AT_DS_ORDERS);
 
-	if(n >= 1 AND n <= atRowCount(pseudoAccount, AT_DS_ORDERS)) {
+	if(n >= 1 AND n <= rowCount) {
 		result = atHandle(pseudoAccount, AT_DS_ORDERS, n);
+	} else {
+		atReportMissingRow("atOrderAt", pseudoAccount, n, rowCount);
 	}
 
 	return result;
