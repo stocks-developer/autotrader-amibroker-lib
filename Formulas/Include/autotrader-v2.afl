@@ -34,6 +34,15 @@
 /* Import AutoTrader specific amibroker libraries */
 
 #include_once<autotrader-pre-util.afl>
+
+/*
+* Before the config file, not after. It carries the DEFAULTS for the API call
+* log, and autotrader-http-config.afl is the file the user edits -- so a
+* setting named in both is decided by their copy, and a setting named in
+* neither (an older config file, kept through an upgrade) still has a value.
+*/
+#include_once<autotrader-http-log.afl>
+
 #include_once<autotrader-http-config.afl>
 #include_once<autotrader-defaults.afl>
 #include_once<autotrader-http-transport.afl>

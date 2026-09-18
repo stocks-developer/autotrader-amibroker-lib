@@ -73,3 +73,49 @@ AT_HTTP_LOCK_TIMEOUT = 60;
 ******************************************************************************/
 
 AT_HTTP_DEBUG = False;
+
+/******************************************************************************
+* THE API CALL LOG -- how to find out where your requests are going.
+*
+* Every request this library sends is written to one CSV file per day, shared
+* by every chart:
+*
+*     <AmiBroker>\Logs\autotrader-api-YYYY-MM-DD.csv
+*
+* Open it in Excel. Each line with SERVED_BY = NETWORK is one request; CACHE
+* and BUSY lines cost nothing. The CHART, SYMBOL and MODE columns say which
+* pane or Exploration it came from, and TARGET says what was asked for.
+*
+* This is the file to look at first if you are told you are making too many
+* requests. It does NOT contain your API key.
+******************************************************************************/
+
+AT_LOG = True;
+
+/******************************************************************************
+* Also log the calls that were answered from the cache and never reached the
+* server.
+*
+* Leave this OFF for normal trading. The number of lines is decided by your
+* strategy rather than by the library -- an Exploration over 500 symbols
+* reading twenty fields a bar writes ten thousand of them -- and each line is a
+* file write, so it will slow a scan down.
+*
+* Turn it ON when you want to see WHICH of your calls are driving the
+* requests, and off again once you know.
+******************************************************************************/
+
+AT_LOG_CALLS = False;
+
+/******************************************************************************
+* Where that file goes. Change it if AmiBroker cannot write to the folder
+* above -- if it cannot, the log switches itself off and says so in the trace
+* window.
+*
+* Keep it the SAME for every chart. The file is worth having because it adds
+* every chart's traffic up in one place, which a per-chart folder would undo.
+*
+* Left alone, it is a Logs folder inside your AmiBroker folder.
+******************************************************************************/
+
+AT_LOG_DIRECTORY = fgetcwd() + "\\Logs";

@@ -299,10 +299,20 @@ function atCsvField(line, column) {
 */
 function atHttpPost(path, postBody) {
 	global atHttpReached;
+	global atLogDurationMs;
 
 	url = AT_BASE_URL + path;
 	response = "";
 	atHttpReached = False;
+
+	/*
+	* Timed so the log can say how long the server took.
+	*
+	* This is the number that separates "I am making too many requests" from
+	* "each request is slow", and they need opposite fixes -- a longer TTL for
+	* the first, and nothing the strategy can do about the second.
+	*/
+	startedAt = GetPerformanceCounter();
 
 	handle = InternetPostRequest(url, postBody);
 
@@ -324,6 +334,8 @@ function atHttpPost(path, postBody) {
 
 		InternetClose(handle);
 	}
+
+	atLogDurationMs = GetPerformanceCounter() - startedAt;
 
 	return response;
 }
@@ -456,6 +468,31 @@ function atTtlFor(dataset) {
 }
 
 /**
+* What a read asked for, as "dataset.FIELD", for the TARGET column of the log.
+*
+* The getters address a field by column NUMBER, so the number is all that is
+* known at the point the log line is written. The stored header turns it back
+* into the name the user would recognise -- "orders.STATUS" rather than
+* "orders.#17".
+*
+* Falls back to the number when there is no header yet, which is the case for
+* exactly one line per dataset per session: the very first request, made before
+* any reply has arrived to take a header from.
+*/
+function atTargetName(pseudoAccount, dataset, column) {
+	fieldName = StrExtract(
+		StaticVarGetText(atCacheKey(pseudoAccount, dataset, "H")), column - 1);
+
+	result = dataset + ".#" + NumToStr(column, 1.0, False);
+
+	if(fieldName != "") {
+		result = dataset + "." + fieldName;
+	}
+
+	return result;
+}
+
+/**
 * Splits a CSV body into rows and stores them, returning how many were kept.
 *
 * The header row is dropped, so row 1 is the first real record and the column
@@ -528,6 +565,9 @@ procedure atDropRows(pseudoAccount, dataset, fromRow, toRow) {
 * one request timed out; the caller decides what to do about the status.
 */
 function atFetchDataset(pseudoAccount, dataset) {
+	global atLogTarget;
+	global atLogDurationMs;
+
 	postBody = "api-key=" + atUrlEncode(AT_API_KEY) +
 		"&pseudoAccount=" + atUrlEncode(pseudoAccount);
 
@@ -540,6 +580,9 @@ function atFetchDataset(pseudoAccount, dataset) {
 	countKey = atCacheKey(pseudoAccount, dataset, "N");
 	previous = Nz(StaticVarGet(countKey));
 
+	/* What the log line says happened, filled in by whichever branch runs. */
+	logDetail = "";
+
 	if(httpStatus == AT_HTTP_CSV) {
 		rows = atStoreRows(pseudoAccount, dataset, response);
 		StaticVarSet(countKey, rows);
@@ -548,6 +591,7 @@ function atFetchDataset(pseudoAccount, dataset) {
 			atDropRows(pseudoAccount, dataset, rows + 1, previous);
 		}
 
+		logDetail = "rows=" + NumToStr(rows, 1.0, False);
 		atHttpTrace(dataset + ": " + NumToStr(rows, 1.0, False) + " rows");
 
 	} else if(httpStatus == AT_HTTP_EMPTY) {
@@ -555,16 +599,40 @@ function atFetchDataset(pseudoAccount, dataset) {
 		StaticVarSet(countKey, 0);
 		atDropRows(pseudoAccount, dataset, 1, previous);
 
+		logDetail = "rows=0";
 		atHttpTrace(dataset + ": empty");
 
 	} else {
 		message = "SD-ERR-AB-READ: " + dataset + " for " + pseudoAccount +
 			" failed [" + httpStatus + "] " + atHttpMessage;
+		logDetail = atHttpMessage;
 		logError(message);
 		_TRACE(message);
 	}
 
 	StaticVarSetText(atCacheKey(pseudoAccount, dataset, "ST"), httpStatus);
+
+	/*
+	* THE request line. This is the one place in the library a portfolio read
+	* leaves the machine, so a line written here is one request and a request
+	* with no line written here does not exist.
+	*
+	* Written whatever the outcome, failures included -- a request that failed
+	* still spent the account's allowance, and a run of them is the shape of
+	* the problem a user is usually trying to show us.
+	*
+	* atLogTarget is the field the caller asked for. It is empty when the read
+	* came from somewhere that does not set it, and then the dataset name alone
+	* is the honest answer.
+	*/
+	logTarget = atLogTarget;
+
+	if(logTarget == "") {
+		logTarget = dataset;
+	}
+
+	atLogWrite(AT_LOG_READ, pseudoAccount, logTarget, AT_LOG_NETWORK,
+		httpStatus, atLogDurationMs, logDetail);
 
 	return httpStatus;
 }
@@ -578,6 +646,8 @@ function atFetchDataset(pseudoAccount, dataset) {
 * network is already in trouble.
 */
 function atEnsureFresh(pseudoAccount, dataset) {
+	global atLogOutcome;
+
 	timeKey = atCacheKey(pseudoAccount, dataset, "TS");
 	statusKey = atCacheKey(pseudoAccount, dataset, "ST");
 	lockKey = atCacheKey(pseudoAccount, dataset, "LOCK");
@@ -599,6 +669,7 @@ function atEnsureFresh(pseudoAccount, dataset) {
 
 	if(fetchedAt > 0 AND DateTimeDiff(Now(5), fetchedAt) < atTtlFor(dataset)) {
 		result = StaticVarGetText(statusKey);
+		atLogServed(AT_LOG_CACHE);
 		done = True;
 	}
 
@@ -640,6 +711,7 @@ function atEnsureFresh(pseudoAccount, dataset) {
 				* the lock would otherwise stall for twenty seconds, once per bar.
 				*/
 				result = StaticVarGetText(statusKey);
+				atLogServed(AT_LOG_BUSY);
 				done = True;
 			}
 		}
@@ -657,6 +729,7 @@ function atEnsureFresh(pseudoAccount, dataset) {
 	if(!done) {
 		if(!tryEnterCriticalSection(lockKey)) {
 			result = StaticVarGetText(statusKey);
+			atLogServed(AT_LOG_BUSY);
 			done = True;
 		}
 	}
@@ -669,9 +742,11 @@ function atEnsureFresh(pseudoAccount, dataset) {
 
 		if(fetchedAt > 0 AND DateTimeDiff(Now(5), fetchedAt) < atTtlFor(dataset)) {
 			result = StaticVarGetText(statusKey);
+			atLogServed(AT_LOG_CACHE);
 
 		} else {
 			result = atFetchDataset(pseudoAccount, dataset);
+			atLogServed(AT_LOG_NETWORK);
 
 			/*
 			* Stamped on failure too. A chart that cannot reach the server must
@@ -685,6 +760,14 @@ function atEnsureFresh(pseudoAccount, dataset) {
 		StaticVarSet(lockTimeKey, 0);
 		leaveCriticalSection();
 	}
+
+	/*
+	* Remembered for the log line the public call will write on the way out. It
+	* is the same value for every branch above -- what the dataset's last
+	* answer from the server was -- so the log can say CSV, EMPTY or
+	* UNREACHABLE even for a call that made no request of its own.
+	*/
+	atLogOutcome = result;
 
 	return result;
 }
@@ -962,6 +1045,7 @@ atHttpResponse = "";
 
 function atSendCommand(csv) {
 	global atHttpResponse;
+	global atLogDurationMs;
 
 	postBody = "api-key=" + atUrlEncode(AT_API_KEY) +
 		"&command=" + atUrlEncode(csv);
@@ -973,6 +1057,25 @@ function atSendCommand(csv) {
 	atRecordStatus(httpStatus, atHttpResponse, True);
 
 	atHttpTrace("reply: " + atHttpResponse);
+
+	/*
+	* A command is always a request -- there is no cache in front of it and
+	* nothing to share between charts -- so this line is written every time.
+	*
+	* Every command CSV starts with the verb and then the account, whichever
+	* command it is, so the first two comma separated fields name both without
+	* this needing to know the shape of the rest. Only those two are read, so a
+	* comma later in the line (a rejection reason in a comment) cannot shift
+	* them.
+	*/
+	if(httpStatus == AT_HTTP_OK) {
+		commandDetail = "id=" + atPipeField(atHttpResponse, 2);
+	} else {
+		commandDetail = atHttpMessage;
+	}
+
+	atLogWrite(AT_LOG_COMMAND, StrExtract(csv, 1), StrExtract(csv, 0),
+		AT_LOG_NETWORK, httpStatus, atLogDurationMs, commandDetail);
 
 	return httpStatus;
 }

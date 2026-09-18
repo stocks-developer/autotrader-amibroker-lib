@@ -100,6 +100,46 @@ Moving a strategy from version 1 to version 2 is **one line** — the include. E
 
 Step 3 is the one people miss. Until "Internal" is ticked the Trace tab stays empty no matter how well your strategy is running — AmiBroker itself says so in the empty tab: *"Internal _TRACE() output is NOT enabled."*
 
+### Finding out how many API requests you are making
+
+If you moved from version 1 to version 2 and you are being told you make too many API requests, this is the section for you.
+
+Nothing in your strategy changed, but what it does underneath did. On version 1 a `get...()` call read a file that the Desktop Client had already written. On version 2 the same call talks to AutoTrader Web, and there is a limit of roughly **one portfolio request per second per account**. A strategy that reads twenty fields on every bar was free before and is not free now.
+
+So version 2 writes down every request it makes. One file per day, shared by every chart:
+
+```
+<your AmiBroker folder>\Logs\autotrader-api-YYYY-MM-DD.csv
+```
+
+Open it in Excel. It has one line per call:
+
+| Column | What it tells you |
+|---|---|
+| `TIMESTAMP` | Date and time, to the millisecond |
+| `ELAPSED_MS` | Milliseconds since AmiBroker started. Subtract two of these to measure a rate |
+| `EVENT` | `READ` for portfolio data, `COMMAND` for placing, modifying, cancelling or squaring off |
+| `MODE` | `chart`, `scan`, `explore`, `backtest`. An Exploration over a big watchlist is the usual surprise |
+| `CHART` | Which chart pane it came from |
+| `SYMBOL` | Which symbol that pane was on |
+| `ACCOUNT` | Which account the request was charged to |
+| `TARGET` | What was asked for, such as `orders.STATUS` or `PLACE_ORDER` |
+| `SERVED_BY` | **`NETWORK` means a request was actually sent.** `CACHE` and `BUSY` cost you nothing |
+| `OUTCOME` | What came back |
+| `DURATION_MS` | How long the server took |
+| `DETAIL` | Row count, order id, or the reason it failed |
+
+**To count your requests, count the lines that say `NETWORK`.** Nothing else in the file is a request.
+
+Two settings control it, both in `autotrader-http-config.afl`:
+
+- `AT_LOG` is `True` out of the box. It writes only the requests, which is a few lines per account per minute even from a busy chart.
+- `AT_LOG_CALLS` is `False` out of the box. Turn it on and the library also writes the calls it answered from its own copy of the data, so you can see **which** of your calls are driving the requests. Turn it off again afterwards: on an Exploration over hundreds of symbols this writes a great many lines and will slow the scan down.
+
+If the numbers are higher than you expect, the first thing to try is raising `AT_TTL_ORDERS` and `AT_TTL_POSITIONS` in the same file. Lowering them does not get you fresher data, because the server answers anything faster than its own refresh from the copy it already holds.
+
+The file never contains your API key.
+
 ### Which AmiBroker version we test on
 
 We test this library on **AmiBroker 6.93, 64-bit**. It needs AmiBroker 6.30 or newer.

@@ -130,6 +130,7 @@ left and passes on state it never created. Every test here starts with a
 | Test | What it pins down |
 |---|---|
 | `at-empty-then-filled.afl` | A dataset that is empty when first read and has rows later. Column names must resolve on the second read — the case that decides whether the first order of the day can be read back. |
+| `at-api-call-log.afl` | The API call log. Mostly that **one public call writes one line**: `atFindRowByName()` reaches `atEnsureFresh()` once per row it scans, so a log written a level lower would report one getter as four requests and hand a user a number that is simply wrong. Also checks the header row, the column layout, the millisecond timestamp, CSV quoting of a rejection reason that contains a comma, and that both switches switch. Its last block points the transport at `127.0.0.1:9` so a request really does leave the machine, with no API key and no server needed. |
 
 ## Two things about AmiBroker itself that cost a session each
 

@@ -1,0 +1,441 @@
+/*
+* Behaviour test for the API call log.
+*
+* Seeds the library's own cache directly, so no request is ever made, no API
+* key is needed and no order is ever placed. Everything logged here is
+* therefore a CACHE line, which is the half of the design that can be tested
+* without a network.
+*
+* The check that matters most is the line COUNT. One public call reaches
+* atEnsureFresh() many times -- atFindRowByName() calls it once per row it
+* scans -- so a log written at that level would report a single getter as four
+* or five requests, and a user counting lines would come to us with a number
+* that is simply wrong.
+*
+* Results are written to a file, because the harness does not capture _TRACE.
+*/
+
+#include <autotrader-http.afl>
+
+AT_TEST_LOG_KEY = "SELFTEST_APILOG_LOG";
+
+StaticVarSetText(AT_TEST_LOG_KEY, "");
+
+/*
+* Records one check and returns 1 when it passed, so the caller can add it up.
+* Both values arrive as text so that numbers and strings read the same way.
+*/
+function atTestCheck(label, actual, expected) {
+	soFar = StaticVarGetText(AT_TEST_LOG_KEY);
+	verdict = 0;
+
+	if(actual == expected) {
+		verdict = 1;
+		StaticVarSetText(AT_TEST_LOG_KEY,
+			soFar + "  ok   " + label + " = " + actual + "\n");
+	} else {
+		StaticVarSetText(AT_TEST_LOG_KEY,
+			soFar + "  FAIL " + label + " = [" + actual +
+			"]  -- expected [" + expected + "]\n");
+	}
+
+	return verdict;
+}
+
+/*
+* How many non-empty lines the log holds. This is the number a user counts,
+* so it is the number the test counts.
+*/
+function atTestLineCount(filePath) {
+	fh = fopen(filePath, FILE_DEFAULT_READ_MODE);
+	counted = 0;
+
+	if(fh) {
+		for(i = 0; i < 200; i++) {
+			if(feof(fh)) {
+				break;
+			}
+
+			line = StrTrim(fgets(fh), "");
+
+			if(line != "") {
+				counted = counted + 1;
+			}
+		}
+
+		fclose(fh);
+	}
+
+	return counted;
+}
+
+/*
+* The n-th non-empty line, 1 based. Blank when there is no such line.
+*/
+function atTestLine(filePath, wanted) {
+	fh = fopen(filePath, FILE_DEFAULT_READ_MODE);
+	counted = 0;
+	result = "";
+
+	if(fh) {
+		for(i = 0; i < 200; i++) {
+			if(feof(fh)) {
+				break;
+			}
+
+			line = StrTrim(fgets(fh), "");
+
+			if(line != "") {
+				counted = counted + 1;
+
+				if(counted == wanted) {
+					result = line;
+					break;
+				}
+			}
+		}
+
+		fclose(fh);
+	}
+
+	return result;
+}
+
+testAccount = "SELFTEST_APILOG";
+passes = 0;
+total = 0;
+
+/************************* POINT THE LOG SOMEWHERE SAFE **********************/
+
+/*
+* The harness folder, not the user's Logs folder, and a prefix of its own so a
+* real log can never be confused with a test one.
+*
+* AFL cannot read an environment variable, so the path is spelled out -- edit
+* it if this repository lives somewhere else.
+*/
+AT_LOG_DIRECTORY = "C:/Users/mhatr/workspace/autotrader-amibroker-lib/tools/amibroker-harness/out";
+AT_LOG_FILE_PREFIX = "selftest-apilog";
+AT_LOG = True;
+AT_LOG_CALLS = True;
+
+logPath = atLogPath();
+
+/*
+* Start from nothing. A static variable outlives the formula that set it, so
+* without clearing the header latch and the broken flag the second run of this
+* test would skip the header it is about to check for, and pass on state the
+* first run created rather than on anything it did itself.
+*/
+fdelete(logPath);
+StaticVarSet(AT_LOG_HEADER_DONE + logPath, 0);
+StaticVarSet(AT_LOG_BROKEN, 0);
+
+StaticVarRemove(AT_HTTP_CACHE_PREFIX + "|" + AT_DS_ORDERS + "|" + testAccount + "*");
+
+/***************************** SEED THE CACHE ********************************/
+
+orderHeader = "PSEUDOACCOUNT,TRADINGACCOUNT,PUBLISHERID,ID,EXCHANGEORDERID,VARIETY," +
+	"INDEPENDENTEXCHANGE,INDEPENDENTSYMBOL,TRADETYPE,ORDERTYPE,PRODUCTTYPE,QUANTITY," +
+	"PRICE,TRIGGERPRICE,FILLEDQUANTITY,PENDINGQUANTITY,STATUS,STATUSMESSAGE,VALIDITY," +
+	"AVERAGEPRICE,PARENTORDERID,DISCLOSEDQUANTITY,EXCHANGETIME,PLATFORMTIME,AMO," +
+	"COMMENTS,RAWSTATUS,EXCHANGE,SYMBOL,DAY,PLATFORM,CLIENTID,STOCKBROKER";
+
+/*
+* THREE rows on purpose. atFindRowByName() scans them one at a time and calls
+* atEnsureFresh() for each, so three rows is what makes the difference between
+* a log that counts calls and one that counts internal plumbing.
+*/
+orderRowOne = "SELFTEST_APILOG,FA0001,,26091800000001,1234,REGULAR,NSE,SBIN,BUY,LIMIT," +
+	"INTRADAY,1,950,0,0,1,OPEN,,DAY,0,,0,,,false,,OPEN,NSE,SBIN-EQ,2026-09-18," +
+	"FINVASIA,FA0001,FINVASIA";
+
+orderRowTwo = "SELFTEST_APILOG,FA0001,,26091800000002,1235,REGULAR,NSE,TCS,BUY,LIMIT," +
+	"INTRADAY,1,3100,0,0,1,OPEN,,DAY,0,,0,,,false,,OPEN,NSE,TCS-EQ,2026-09-18," +
+	"FINVASIA,FA0001,FINVASIA";
+
+orderRowThree = "SELFTEST_APILOG,FA0001,,26091800000003,1236,REGULAR,NSE,INFY,BUY,LIMIT," +
+	"INTRADAY,1,1500,0,0,1,OPEN,,DAY,0,,0,,,false,,OPEN,NSE,INFY-EQ,2026-09-18," +
+	"FINVASIA,FA0001,FINVASIA";
+
+StaticVarSetText(atCacheKey(testAccount, AT_DS_ORDERS, "H"), orderHeader);
+StaticVarSetText(atRowKey(testAccount, AT_DS_ORDERS, 1), orderRowOne);
+StaticVarSetText(atRowKey(testAccount, AT_DS_ORDERS, 2), orderRowTwo);
+StaticVarSetText(atRowKey(testAccount, AT_DS_ORDERS, 3), orderRowThree);
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "N"), 3);
+StaticVarSetText(atCacheKey(testAccount, AT_DS_ORDERS, "ST"), AT_HTTP_CSV);
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "TS"), Now(5));
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "LOCK"), 0);
+StaticVarSet(atCacheKey(testAccount, AT_DS_ORDERS, "LOCKTS"), 0);
+
+/*************************** THE FILE AND ITS HEADER *************************/
+
+total = total + 1;
+passes = passes + atTestCheck("no log file before the first call",
+	NumToStr(atTestLineCount(logPath), 1.0, False), "0");
+
+/* One ordinary getter. The kind a strategy calls on every bar. */
+orderStatus = getOrderStatus(testAccount, "26091800000001");
+
+total = total + 1;
+passes = passes + atTestCheck("the getter still returns its value",
+	orderStatus, "OPEN");
+
+total = total + 1;
+passes = passes + atTestCheck("header plus one line",
+	NumToStr(atTestLineCount(logPath), 1.0, False), "2");
+
+total = total + 1;
+passes = passes + atTestCheck("header row is the column list",
+	atTestLine(logPath, 1), AT_LOG_COLUMNS);
+
+/***************************** THE LINE ITSELF *******************************/
+
+firstLine = atTestLine(logPath, 2);
+
+total = total + 1;
+passes = passes + atTestCheck("EVENT", StrExtract(firstLine, 2), AT_LOG_READ);
+
+total = total + 1;
+passes = passes + atTestCheck("MODE", StrExtract(firstLine, 3), "explore");
+
+total = total + 1;
+passes = passes + atTestCheck("ACCOUNT", StrExtract(firstLine, 6), testAccount);
+
+/*
+* The column number the getter used, turned back into the name the user knows.
+* getOrderStatus() asks for column 17 and nothing in the call says "STATUS";
+* the stored header is what puts the name in the log.
+*/
+total = total + 1;
+passes = passes + atTestCheck("TARGET names the field, not the column number",
+	StrExtract(firstLine, 7), "orders.STATUS");
+
+total = total + 1;
+passes = passes + atTestCheck("SERVED_BY", StrExtract(firstLine, 8), AT_LOG_CACHE);
+
+total = total + 1;
+passes = passes + atTestCheck("OUTCOME", StrExtract(firstLine, 9), AT_HTTP_CSV);
+
+total = total + 1;
+passes = passes + atTestCheck("DURATION_MS is zero for a cache hit",
+	StrExtract(firstLine, 10), "0");
+
+/******************************* THE TIMESTAMP *******************************/
+
+stamp = StrExtract(firstLine, 0);
+
+total = total + 1;
+passes = passes + atTestCheck("timestamp length",
+	NumToStr(StrLen(stamp), 1.0, False), "23");
+
+total = total + 1;
+passes = passes + atTestCheck("timestamp separates date from time",
+	StrMid(stamp, 10, 1), " ");
+
+total = total + 1;
+passes = passes + atTestCheck("timestamp has a millisecond dot",
+	StrMid(stamp, 19, 1), ".");
+
+total = total + 1;
+passes = passes + atTestCheck("timestamp starts with this year",
+	StrMid(stamp, 0, 4), StrFormat("%04.0f", Now(8)));
+
+/*
+* ELAPSED_MS must be a real counter reading, not a placeholder. Anything above
+* zero means GetPerformanceCounter() answered.
+*/
+total = total + 1;
+passes = passes + atTestCheck("ELAPSED_MS is a counter reading",
+	NumToStr(StrToNum(StrExtract(firstLine, 1)) > 0, 1.0, False), "1");
+
+/*********** ONE PUBLIC CALL IS ONE LINE, WHATEVER IT DOES INSIDE ************/
+
+/*
+* atFindOrder() walks the rows: atRowCount() calls atEnsureFresh() once and
+* then atReadRowColumn() calls it again for every row scanned. Four calls
+* underneath, one line on top.
+*/
+before = atTestLineCount(logPath);
+foundOrder = atFindOrder(testAccount, "26091800000003");
+afterFind = atTestLineCount(logPath);
+
+total = total + 1;
+passes = passes + atTestCheck("atFindOrder found the third row",
+	NumToStr(atFound(foundOrder), 1.0, False), "1");
+
+total = total + 1;
+passes = passes + atTestCheck("a three-row scan is ONE line, not four",
+	NumToStr(afterFind - before, 1.0, False), "1");
+
+/* Reading a field off the handle is its own call, and its own single line. */
+beforeText = atTestLineCount(logPath);
+symbolRead = atText(foundOrder, "INDEPENDENTSYMBOL");
+afterText = atTestLineCount(logPath);
+
+total = total + 1;
+passes = passes + atTestCheck("atText returned the field", symbolRead, "INFY");
+
+total = total + 1;
+passes = passes + atTestCheck("atText is one line",
+	NumToStr(afterText - beforeText, 1.0, False), "1");
+
+total = total + 1;
+passes = passes + atTestCheck("atText names the field it was asked for",
+	StrExtract(atTestLine(logPath, afterText), 7), "orders.INDEPENDENTSYMBOL");
+
+/*
+* atNum() delegates to atText(). It must not log a second time -- a strategy
+* reading a number would otherwise appear to make twice the calls it makes.
+*/
+beforeNum = atTestLineCount(logPath);
+priceRead = atNum(foundOrder, "PRICE");
+afterNum = atTestLineCount(logPath);
+
+total = total + 1;
+passes = passes + atTestCheck("atNum is one line, not two",
+	NumToStr(afterNum - beforeNum, 1.0, False), "1");
+
+/************************** THE SWITCHES ACTUALLY SWITCH *********************/
+
+AT_LOG_CALLS = False;
+
+beforeOff = atTestLineCount(logPath);
+quietStatus = getOrderStatus(testAccount, "26091800000002");
+afterOff = atTestLineCount(logPath);
+
+total = total + 1;
+passes = passes + atTestCheck("the getter still works with call logging off",
+	quietStatus, "OPEN");
+
+total = total + 1;
+passes = passes + atTestCheck("a cache hit writes nothing when AT_LOG_CALLS is off",
+	NumToStr(afterOff - beforeOff, 1.0, False), "0");
+
+AT_LOG_CALLS = True;
+AT_LOG = False;
+
+beforeAllOff = atTestLineCount(logPath);
+silentStatus = getOrderStatus(testAccount, "26091800000002");
+afterAllOff = atTestLineCount(logPath);
+
+total = total + 1;
+passes = passes + atTestCheck("the getter still works with logging off entirely",
+	silentStatus, "OPEN");
+
+total = total + 1;
+passes = passes + atTestCheck("nothing is written when AT_LOG is off",
+	NumToStr(afterAllOff - beforeAllOff, 1.0, False), "0");
+
+AT_LOG = True;
+
+/****************************** CSV SAFETY ***********************************/
+
+/*
+* A broker rejection reason routinely contains a comma -- "RMS: margin
+* shortfall, order rejected" -- and an unquoted one would shift every column
+* after it. Written straight through atLogWrite so the test does not need a
+* rejection to happen.
+*/
+beforeEscape = atTestLineCount(logPath);
+atLogWrite(AT_LOG_COMMAND, testAccount, AT_PLACE_ORDER_CMD, AT_LOG_NETWORK,
+	AT_HTTP_ERROR, 412, "RMS: margin shortfall, order rejected");
+escapeLine = atTestLine(logPath, beforeEscape + 1);
+
+total = total + 1;
+passes = passes + atTestCheck("a comma in DETAIL does not become a new column",
+	StrExtract(escapeLine, 11), AT_LOG_QUOTE + "RMS: margin shortfall");
+
+total = total + 1;
+passes = passes + atTestCheck("a command line is one line",
+	NumToStr(atTestLineCount(logPath) - beforeEscape, 1.0, False), "1");
+
+total = total + 1;
+passes = passes + atTestCheck("EVENT says COMMAND",
+	StrExtract(escapeLine, 2), AT_LOG_COMMAND);
+
+total = total + 1;
+passes = passes + atTestCheck("DURATION_MS carries the measured time",
+	StrExtract(escapeLine, 10), "412");
+
+/****************** A REQUEST THAT ACTUALLY LEAVES THE MACHINE ***************/
+
+/*
+* Everything above is a cache line. This is the other kind -- the line the
+* whole file exists to produce -- and it is produced by making a real request.
+*
+* No API key and no server are needed for it. The transport is pointed at a
+* port nothing listens on, so the connection is refused at once: what came
+* back does not decide whether a request went out, and a failed request spends
+* the account's allowance exactly like a successful one.
+*/
+netAccount = "SELFTEST_APILOG_NET";
+
+StaticVarRemove(AT_HTTP_CACHE_PREFIX + "|" + AT_DS_MARGINS + "|" + netAccount + "*");
+
+AT_BASE_URL = "http://127.0.0.1:9";
+
+/* Off on purpose: a REQUEST must be logged whatever this is set to. */
+AT_LOG_CALLS = False;
+
+beforeNet = atTestLineCount(logPath);
+marginRead = getMarginAvailableEquity(netAccount);
+netLine = atTestLine(logPath, beforeNet + 1);
+
+total = total + 1;
+passes = passes + atTestCheck("a request writes exactly one line",
+	NumToStr(atTestLineCount(logPath) - beforeNet, 1.0, False), "1");
+
+total = total + 1;
+passes = passes + atTestCheck("a request is logged even with AT_LOG_CALLS off",
+	StrExtract(netLine, 8), AT_LOG_NETWORK);
+
+total = total + 1;
+passes = passes + atTestCheck("an unreachable server is recorded as such",
+	StrExtract(netLine, 9), AT_HTTP_UNREACHABLE);
+
+total = total + 1;
+passes = passes + atTestCheck("the request is charged to the right account",
+	StrExtract(netLine, 6), netAccount);
+
+/*
+* No reply has ever arrived for this dataset, so there is no header to turn
+* column 6 into a name. The column number is the honest answer, and this is
+* the one line per dataset per session that gets it.
+*/
+total = total + 1;
+passes = passes + atTestCheck("with no header yet, TARGET falls back to the column",
+	StrExtract(netLine, 7), "margins.#6");
+
+/*
+* A failed read must leave the getter's own contract alone: zero, as it always
+* was, rather than an error the strategy has no way to handle.
+*/
+total = total + 1;
+passes = passes + atTestCheck("the getter still returns zero on a failed read",
+	NumToStr(marginRead, 1.0, False), "0");
+
+/***************************** WRITE THE RESULT ******************************/
+
+summary = "";
+
+if(passes == total) {
+	summary = "SELFTEST-RESULT: PASS " + NumToStr(passes, 1.0, False) + " of " +
+		NumToStr(total, 1.0, False) + "\n";
+} else {
+	summary = "SELFTEST-RESULT: FAIL " + NumToStr(total - passes, 1.0, False) +
+		" of " + NumToStr(total, 1.0, False) + " failed\n";
+}
+
+markerPath = "C:/Users/mhatr/workspace/autotrader-amibroker-lib/tools/amibroker-harness/out/marker.txt";
+markerFile = fopen(markerPath, "w");
+
+if(markerFile) {
+	fputs("log file: " + logPath + "\n", markerFile);
+	fputs(StaticVarGetText(AT_TEST_LOG_KEY), markerFile);
+	fputs(summary, markerFile);
+	fclose(markerFile);
+}
+
+Filter = 1;
+AddColumn(Close, "Close");

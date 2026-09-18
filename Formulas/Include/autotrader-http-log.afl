@@ -1,0 +1,411 @@
+/******************************************************************************
+*
+* AutoTrader Web -- the API call log, for the direct (HTTP) library.
+* DO NOT MODIFY THIS FILE
+* Version: 1.0
+*
+* Writes one CSV line for every request this library sends to AutoTrader Web,
+* so that "why am I hitting the API limit?" can be answered by looking rather
+* than by guessing.
+*
+* WHY IT EXISTS
+* -------------
+* The file based library never touched the network: a strategy calling twenty
+* get...() functions on every bar read a file twenty times, and a file has no
+* rate limit. The same strategy on the direct library is talking to a server,
+* and the server allows roughly one portfolio request per second per account.
+* Nothing in the strategy changed, so nothing in the strategy says where the
+* requests are coming from. This file is the answer to that.
+*
+* WHERE IT WRITES
+* ---------------
+* One file per day, shared by every chart in this AmiBroker:
+*
+*     <AmiBroker>\Logs\autotrader-api-YYYY-MM-DD.csv
+*
+* Deliberately ONE file rather than one per chart. Ten charts trading one
+* account share a cache and a rate limit, so the only number that means
+* anything is the total, and a per-chart file cannot be added up by eye. The
+* CHART and SYMBOL columns say which pane a line came from.
+*
+* HOW TO READ IT
+* --------------
+*     SERVED_BY = NETWORK   a request actually left this machine. COUNT THESE.
+*     SERVED_BY = CACHE     answered from data already held. Cost nothing.
+*     SERVED_BY = BUSY      another chart was already fetching it. Cost nothing.
+*
+* So the number of requests in a stretch of time is the number of NETWORK
+* lines in it, and everything else in the file is there to say what caused
+* them.
+*
+* ABOUT THE TIMESTAMP
+* -------------------
+* AmiBroker gives AFL the wall clock only to the second -- Now(4) is HHMMSS and
+* there is no millisecond in it. The milliseconds after the dot are therefore
+* measured with GetPerformanceCounter(), from the first line logged in that
+* second, and they are exact RELATIVE to each other inside one second. Read
+* .000 as "first line of this second", not as "exactly on the second".
+*
+* ELAPSED_MS is the raw counter: milliseconds since AmiBroker started, exact
+* and always increasing. For measuring a rate -- how many requests in how long
+* -- subtract two ELAPSED_MS values rather than parsing the timestamps.
+*
+******************************************************************************/
+
+/******************************* SETTINGS ************************************/
+
+/*
+* These are the DEFAULTS. To change one, set it in autotrader-http-config.afl,
+* which is read after this file and therefore wins.
+*
+* They live here rather than only in the config file on purpose. Anyone who
+* upgraded the library still has their own older copy of the config file, and
+* that copy names none of these -- a setting that existed only there would be
+* an uninitialised variable on the first log line, which is Error 29 and stops
+* the formula dead.
+*/
+
+/*
+* Write the log at all.
+*
+* A request line costs one short file write, and the TTLs in the config file
+* cap how often a request can happen, so this is a few lines per account per
+* minute even from a busy chart.
+*/
+AT_LOG = True;
+
+/*
+* Also log calls that did NOT reach the network -- the ones answered from the
+* cache.
+*
+* OFF by default because the volume is decided by your strategy rather than by
+* the library: an Exploration over 500 symbols that reads twenty fields a bar
+* produces ten thousand lines, and each one is a file write. Turn it on when
+* you want to see WHICH calls are driving the requests, and off again after.
+*/
+AT_LOG_CALLS = False;
+
+/*
+* Where the file goes. Defaults to the same Logs folder the rest of the
+* library uses.
+*
+* This is a plain setting and NOT a chart Parameter, unlike the logs folder in
+* logs-util.afl. A Parameter is per chart, and a per chart log directory would
+* scatter the lines across as many files as you have panes -- which defeats the
+* one thing this file is for, namely counting them all together.
+*
+* fgetcwd() so that the folder follows YOUR AmiBroker rather than a fixed path
+* written here. This log is on unless you turn it off, so it has to land
+* somewhere real on every machine and not only on the ones installed where a
+* default expected.
+*
+* AmiBroker resolves Formulas\... against its working directory, so that
+* directory is the install folder.
+*/
+AT_LOG_DIRECTORY = fgetcwd() + "\\Logs";
+
+AT_LOG_FILE_PREFIX = "autotrader-api";
+
+/******************************* CONSTANTS ***********************************/
+
+AT_LOG_COLUMNS = "TIMESTAMP,ELAPSED_MS,EVENT,MODE,CHART,SYMBOL,ACCOUNT," +
+	"TARGET,SERVED_BY,OUTCOME,DURATION_MS,DETAIL";
+
+/* What kind of traffic a line describes. */
+AT_LOG_READ = "READ";
+AT_LOG_COMMAND = "COMMAND";
+
+/* How a call was answered. Only NETWORK costs a request. */
+AT_LOG_NETWORK = "NETWORK";
+AT_LOG_CACHE = "CACHE";
+AT_LOG_BUSY = "BUSY";
+
+/*
+* One double quote, as a string. Held once, for the same reason the transport
+* holds its own: a bare quote inside a quoted string is exactly the kind of
+* thing a careless copy breaks silently.
+*/
+AT_LOG_QUOTE = "\"";
+
+/*
+* Retries when the file is momentarily held by another chart.
+*
+* fileWriteLineAdvanced does not sleep between attempts, so this costs
+* microseconds and never stalls a chart. Kept above the 2 used by logs-util
+* because ten charts share this one file, and a dropped line here is a request
+* that silently does not appear in the count.
+*/
+AT_LOG_WRITE_RETRIES = 5;
+
+/* Static variable names. Shared across every chart, hence not chart specific. */
+AT_LOG_ANCHOR_SECOND = "ATLOGANCHORSECOND";
+AT_LOG_ANCHOR_COUNTER = "ATLOGANCHORCOUNTER";
+AT_LOG_BROKEN = "ATLOGBROKEN";
+AT_LOG_HEADER_DONE = "ATLOGHEADERDONE";
+
+/******************************** STATE **************************************/
+
+/*
+* What the call currently running has cost so far.
+*
+* Reset by atLogBegin() at the top of every public read, then filled in from
+* underneath as the call goes: atEnsureFresh() says how it was answered,
+* atHttpPost() says how long the network took. Held as globals because the
+* functions that know these things are four levels below the one that logs
+* them, and threading them back up would change the signature of everything in
+* between.
+*/
+global atLogTarget;
+atLogTarget = "";
+
+global atLogServedBy;
+atLogServedBy = "";
+
+global atLogOutcome;
+atLogOutcome = "";
+
+global atLogDurationMs;
+atLogDurationMs = 0;
+
+/******************************* PLUMBING ************************************/
+
+/**
+* Milliseconds within the current second.
+*
+* AFL has no sub-second clock, so this is the distance from the first line
+* logged in this second, measured on the performance counter. Re-anchored
+* whenever the wall clock second changes, and whenever the distance stops
+* making sense -- the counter can be reset by other AFL code calling
+* GetPerformanceCounter(True), which would otherwise leave this negative
+* forever.
+*/
+function atLogMillis() {
+	ticks = GetPerformanceCounter();
+	secondId = Now(4);
+	millis = ticks - Nz(StaticVarGet(AT_LOG_ANCHOR_COUNTER));
+
+	if(secondId != Nz(StaticVarGet(AT_LOG_ANCHOR_SECOND)) OR millis < 0 OR millis > 999) {
+		StaticVarSet(AT_LOG_ANCHOR_SECOND, secondId);
+		StaticVarSet(AT_LOG_ANCHOR_COUNTER, ticks);
+		millis = 0;
+	}
+
+	return millis;
+}
+
+/**
+* The wall clock as YYYY-MM-DD HH:MM:SS.mmm -- sortable, and the same shape
+* every day of the year.
+*
+* Assembled from the parts rather than taken from Now(0), which formats as
+* "18-Sep-26 10:58:08 AM": a two digit year, a month spelled in English and a
+* twelve hour clock, none of which sort and the last of which needs the AM/PM
+* read before two lines can be put in order.
+*
+* Now(6), Now(7) and Now(8) are day, month and year -- in that order, which is
+* not the order the names suggest -- and Now(4) is the time as HHMMSS on a
+* twenty-four hour clock. Measured, not remembered.
+*/
+function atLogTimestamp() {
+	clock = Now(4);
+
+	return StrFormat("%04.0f-%02.0f-%02.0f %02.0f:%02.0f:%02.0f.%03.0f",
+		Now(8), Now(7), Now(6),
+		int(clock / 10000), int(clock / 100) % 100, clock % 100,
+		atLogMillis());
+}
+
+/**
+* Which window the call came from.
+*
+* Worth a column of its own because the shape of the traffic differs
+* completely: a chart reads one account over and over, while an Exploration
+* walks every symbol in a watchlist and can produce more requests in one run
+* than a chart does all day.
+*
+* The action constants are AmiBroker's own. actionOptimize is deliberately NOT
+* among them -- it does not exist, and naming it is Error 29, which stops the
+* formula on the first line it logs.
+*/
+function atLogMode() {
+	actionId = Status("action");
+	result = "other";
+
+	if(actionId == actionIndicator) {
+		result = "chart";
+	}
+	if(actionId == actionCommentary) {
+		result = "commentary";
+	}
+	if(actionId == actionScan) {
+		result = "scan";
+	}
+	if(actionId == actionExplore) {
+		result = "explore";
+	}
+	if(actionId == actionBacktest) {
+		result = "backtest";
+	}
+	if(actionId == actionPortfolio) {
+		result = "portfolio";
+	}
+
+	return result;
+}
+
+/**
+* One value, safe to put in a CSV field.
+*
+* Line breaks are replaced rather than quoted. A quoted newline is legal CSV
+* and Excel reads it correctly, but it would make one logical line into two
+* physical ones -- and counting physical lines is exactly how anyone will count
+* requests in this file.
+*/
+function atLogCsvValue(value) {
+	clean = StrReplace(StrReplace(value, "\r", " "), "\n", " ");
+	result = clean;
+
+	if(StrFind(clean, ",") > 0 OR StrFind(clean, AT_LOG_QUOTE) > 0) {
+		result = AT_LOG_QUOTE +
+			StrReplace(clean, AT_LOG_QUOTE, AT_LOG_QUOTE + AT_LOG_QUOTE) +
+			AT_LOG_QUOTE;
+	}
+
+	return result;
+}
+
+/**
+* Today's file. Changes at midnight on its own, because the date is in the name.
+*/
+function atLogPath() {
+	return AT_LOG_DIRECTORY + "\\" + AT_LOG_FILE_PREFIX + "-" +
+		StrFormat("%04.0f-%02.0f-%02.0f", Now(8), Now(7), Now(6)) + ".csv";
+}
+
+/**
+* Makes sure the folder exists and the file starts with a header row.
+*
+* One chart in this AmiBroker does this, once per file, elected with
+* StaticVarCompareExchange. Deliberately NOT tryEnterCriticalSection: a request
+* line is written from inside atFetchDataset(), which already holds the dataset
+* lock, and the shared _cursec those two functions use is not re-entrant --
+* leaving the inner section would release the outer one and strand that dataset
+* behind a lock nobody holds until it times out sixty seconds later.
+*/
+procedure atLogPrepare(filePath) {
+	if(StaticVarCompareExchange(AT_LOG_HEADER_DONE + filePath, 1, 0) == 0) {
+		fmkdir(AT_LOG_DIRECTORY);
+
+		/*
+		* A header only belongs on a file that does not exist yet. Opening for
+		* read is the test: fopen returns False for a file that is not there,
+		* measured, and appending would otherwise put a header in the middle of
+		* the day's lines every time AmiBroker restarts.
+		*/
+		existing = fopen(filePath, FILE_DEFAULT_READ_MODE);
+
+		if(existing) {
+			fclose(existing);
+		} else {
+			fileWriteLineAdvanced(filePath, FILE_DEFAULT_WRITE_MODE,
+				FILE_DEFAULT_WRITE_SHARED_FLAG, AT_LOG_WRITE_RETRIES,
+				AT_LOG_COLUMNS);
+		}
+	}
+}
+
+/**
+* Writes one line. The only function in this file that touches the disk.
+*
+* After a failed write the log switches itself off for the rest of the session.
+* The cause is always the same -- the folder cannot be written to -- so retrying
+* on every call would mean a failed file write on every get...(), which is far
+* more expensive than the logging it is failing to do.
+*/
+procedure atLogWrite(eventKind, pseudoAccount, target, servedBy, outcome,
+	durationMs, detail) {
+
+	if(AT_LOG AND Nz(StaticVarGet(AT_LOG_BROKEN)) == 0) {
+		filePath = atLogPath();
+		atLogPrepare(filePath);
+
+		line = atLogTimestamp() + "," +
+			NumToStr(GetPerformanceCounter(), 1.0, False) + "," +
+			eventKind + "," +
+			atLogMode() + "," +
+			NumToStr(GetChartID(), 1.0, False) + "," +
+			atLogCsvValue(Name()) + "," +
+			atLogCsvValue(pseudoAccount) + "," +
+			atLogCsvValue(target) + "," +
+			servedBy + "," +
+			outcome + "," +
+			NumToStr(durationMs, 1.0, False) + "," +
+			atLogCsvValue(detail);
+
+		written = fileWriteLineAdvanced(filePath, FILE_DEFAULT_WRITE_MODE,
+			FILE_DEFAULT_WRITE_SHARED_FLAG, AT_LOG_WRITE_RETRIES, line);
+
+		if(written == False) {
+			StaticVarSet(AT_LOG_BROKEN, 1);
+
+			_TRACE("AutoTrader: SD-ERR-AB-LOG: could not write the API call log to [" +
+				filePath + "]. Set AT_LOG_DIRECTORY in autotrader-http-config.afl to a " +
+				"folder AmiBroker can write to, or set AT_LOG = False to switch this off. " +
+				"Logging is now off for the rest of this session.");
+		}
+	}
+}
+
+/**
+* Starts a public call, naming what it is going to ask for.
+*
+* Everything the line eventually reports is gathered between here and
+* atLogCall(), so this has to run before the read rather than after it.
+*/
+procedure atLogBegin(target) {
+	global atLogTarget;
+	global atLogServedBy;
+	global atLogOutcome;
+	global atLogDurationMs;
+
+	atLogTarget = target;
+	atLogServedBy = "";
+	atLogOutcome = "";
+	atLogDurationMs = 0;
+}
+
+/**
+* Records how the call was answered, remembering the most expensive answer.
+*
+* Sticky towards NETWORK on purpose. One public call reaches atEnsureFresh()
+* many times -- atFindRowByName() alone calls it once per row it scans -- and
+* only the first of those can fetch. Taking the LAST answer would report a call
+* that made a request as a cache hit.
+*/
+procedure atLogServed(how) {
+	global atLogServedBy;
+
+	if(atLogServedBy != AT_LOG_NETWORK) {
+		atLogServedBy = how;
+	}
+}
+
+/**
+* Ends a public call, writing a line only if nothing else already has.
+*
+* A call that reached the network was logged by atFetchDataset() as it went, so
+* logging again here would count one request twice -- and the count is the whole
+* point of the file.
+*/
+procedure atLogCall(pseudoAccount) {
+	global atLogTarget;
+	global atLogServedBy;
+	global atLogOutcome;
+
+	if(AT_LOG AND AT_LOG_CALLS) {
+		if(atLogServedBy == AT_LOG_CACHE OR atLogServedBy == AT_LOG_BUSY) {
+			atLogWrite(AT_LOG_READ, pseudoAccount, atLogTarget, atLogServedBy,
+				atLogOutcome, 0, "");
+		}
+	}
+}

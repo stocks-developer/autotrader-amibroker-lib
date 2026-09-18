@@ -222,8 +222,14 @@ function isDuplicateSignal(account, tradeType, symbol) {
 * column 3, the publisher id, which this library never creates.
 */
 function readOrderColumn(pseudoAccount, orderId, columnIndex) {
-	return atReadColumn(pseudoAccount, AT_DS_ORDERS, orderId,
+	atLogBegin(atTargetName(pseudoAccount, AT_DS_ORDERS, columnIndex));
+
+	result = atReadColumn(pseudoAccount, AT_DS_ORDERS, orderId,
 		AT_ORDER_ID_COLUMN, columnIndex);
+
+	atLogCall(pseudoAccount);
+
+	return result;
 }
 
 /*
@@ -235,12 +241,18 @@ function readPositionColumnInternal(pseudoAccount,
 	independentExchange, independentExchangeColumnIndex,
 	independentSymbol, independentSymbolColumnIndex, columnIndex) {
 
-	return atReadColumn4(pseudoAccount, AT_DS_POSITIONS,
+	atLogBegin(atTargetName(pseudoAccount, AT_DS_POSITIONS, columnIndex));
+
+	result = atReadColumn4(pseudoAccount, AT_DS_POSITIONS,
 		category, categoryColumnIndex,
 		type, typeColumnIndex,
 		independentExchange, independentExchangeColumnIndex,
 		independentSymbol, independentSymbolColumnIndex,
 		columnIndex);
+
+	atLogCall(pseudoAccount);
+
+	return result;
 }
 
 /*
@@ -258,13 +270,21 @@ function readPositionColumn(pseudoAccount,
 * Reads margins and returns a column value for the given margin category.
 */
 function readMarginColumn(pseudoAccount, category, columnIndex) {
-	return atReadColumn(pseudoAccount, AT_DS_MARGINS, category, 3, columnIndex);
+	atLogBegin(atTargetName(pseudoAccount, AT_DS_MARGINS, columnIndex));
+
+	result = atReadColumn(pseudoAccount, AT_DS_MARGINS, category, 3, columnIndex);
+
+	atLogCall(pseudoAccount);
+
+	return result;
 }
 
 /*
 * Reads holdings and returns a column value for the given symbol.
 */
 function readHoldingColumn(pseudoAccount, symbol, columnIndex) {
+	atLogBegin(atTargetName(pseudoAccount, AT_DS_HOLDINGS, columnIndex));
+
 	/*
 	* Match on the INDEPENDENT symbol, by name.
 	*
@@ -291,6 +311,8 @@ function readHoldingColumn(pseudoAccount, symbol, columnIndex) {
 	if(row > 0) {
 		result = atReadRowColumn(pseudoAccount, AT_DS_HOLDINGS, row, columnIndex);
 	}
+
+	atLogCall(pseudoAccount);
 
 	return result;
 }
@@ -347,8 +369,12 @@ function atText(handle, fieldName) {
 	result = "";
 
 	if(handle != "") {
+		atLogBegin(atPipeField(handle, 2) + "." + StrToUpper(fieldName));
+
 		result = atFieldByName(atPipeField(handle, 1), atPipeField(handle, 2),
 			StrToNum(atPipeField(handle, 3)), fieldName);
+
+		atLogCall(atPipeField(handle, 1));
 	}
 
 	return result;
@@ -372,7 +398,10 @@ function atFindHolding(pseudoAccount, exchange, symbol) {
 		field = "INDEPENDENTSYMBOLBSE";
 	}
 
+	atLogBegin(AT_DS_HOLDINGS + ".find");
 	row = atFindRowByName(pseudoAccount, AT_DS_HOLDINGS, field, symbol);
+	atLogCall(pseudoAccount);
+
 	result = "";
 
 	if(row > 0) {
@@ -386,7 +415,10 @@ function atFindHolding(pseudoAccount, exchange, symbol) {
 * Finds one order by the broker's order id -- what placeOrder() returns.
 */
 function atFindOrder(pseudoAccount, orderId) {
+	atLogBegin(AT_DS_ORDERS + ".find");
 	row = atFindRowByName(pseudoAccount, AT_DS_ORDERS, "ID", orderId);
+	atLogCall(pseudoAccount);
+
 	result = "";
 
 	if(row > 0) {
@@ -401,9 +433,11 @@ function atFindOrder(pseudoAccount, orderId) {
 * category, type, exchange and symbol together.
 */
 function atFindPosition(pseudoAccount, category, type, exchange, symbol) {
+	atLogBegin(AT_DS_POSITIONS + ".find");
 	row = atFindRowByName4(pseudoAccount, AT_DS_POSITIONS,
 		"CATEGORY", category, "TYPE", type,
 		"INDEPENDENTEXCHANGE", exchange, "INDEPENDENTSYMBOL", symbol);
+	atLogCall(pseudoAccount);
 
 	result = "";
 
@@ -418,7 +452,10 @@ function atFindPosition(pseudoAccount, category, type, exchange, symbol) {
 * Finds one margin category: EQUITY, COMMODITY or ALL.
 */
 function atFindMargin(pseudoAccount, category) {
+	atLogBegin(AT_DS_MARGINS + ".find");
 	row = atFindRowByName(pseudoAccount, AT_DS_MARGINS, "CATEGORY", category);
+	atLogCall(pseudoAccount);
+
 	result = "";
 
 	if(row > 0) {
@@ -443,15 +480,33 @@ function atFindMargin(pseudoAccount, category) {
 * A row number outside 1..count returns an empty row and logs SD-ERR-AB-ROW.
 */
 function atHoldingCount(pseudoAccount) {
-	return atRowCount(pseudoAccount, AT_DS_HOLDINGS);
+	atLogBegin(AT_DS_HOLDINGS + ".count");
+
+	result = atRowCount(pseudoAccount, AT_DS_HOLDINGS);
+
+	atLogCall(pseudoAccount);
+
+	return result;
 }
 
 function atPositionCount(pseudoAccount) {
-	return atRowCount(pseudoAccount, AT_DS_POSITIONS);
+	atLogBegin(AT_DS_POSITIONS + ".count");
+
+	result = atRowCount(pseudoAccount, AT_DS_POSITIONS);
+
+	atLogCall(pseudoAccount);
+
+	return result;
 }
 
 function atOrderCount(pseudoAccount) {
-	return atRowCount(pseudoAccount, AT_DS_ORDERS);
+	atLogBegin(AT_DS_ORDERS + ".count");
+
+	result = atRowCount(pseudoAccount, AT_DS_ORDERS);
+
+	atLogCall(pseudoAccount);
+
+	return result;
 }
 
 /*
@@ -473,7 +528,10 @@ procedure atReportMissingRow(functionName, pseudoAccount, n, rowCount) {
 
 function atHoldingAt(pseudoAccount, n) {
 	result = "";
+
+	atLogBegin(AT_DS_HOLDINGS + ".count");
 	rowCount = atRowCount(pseudoAccount, AT_DS_HOLDINGS);
+	atLogCall(pseudoAccount);
 
 	if(n >= 1 AND n <= rowCount) {
 		result = atHandle(pseudoAccount, AT_DS_HOLDINGS, n);
@@ -486,7 +544,10 @@ function atHoldingAt(pseudoAccount, n) {
 
 function atPositionAt(pseudoAccount, n) {
 	result = "";
+
+	atLogBegin(AT_DS_POSITIONS + ".count");
 	rowCount = atRowCount(pseudoAccount, AT_DS_POSITIONS);
+	atLogCall(pseudoAccount);
 
 	if(n >= 1 AND n <= rowCount) {
 		result = atHandle(pseudoAccount, AT_DS_POSITIONS, n);
@@ -499,7 +560,10 @@ function atPositionAt(pseudoAccount, n) {
 
 function atOrderAt(pseudoAccount, n) {
 	result = "";
+
+	atLogBegin(AT_DS_ORDERS + ".count");
 	rowCount = atRowCount(pseudoAccount, AT_DS_ORDERS);
+	atLogCall(pseudoAccount);
 
 	if(n >= 1 AND n <= rowCount) {
 		result = atHandle(pseudoAccount, AT_DS_ORDERS, n);
