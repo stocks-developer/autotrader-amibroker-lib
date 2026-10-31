@@ -60,7 +60,13 @@ function calcPositionType(variety, productType) {
 		case AT_VARIETY_BO:
 			positionType = AT_POSITION_BO;
 			break;
-			
+
+		// The entry is a plain intraday order, so the position is an ordinary MIS one
+		case AT_VARIETY_AT_BO:
+		case AT_VARIETY_AT_CO:
+			positionType = AT_POSITION_MIS;
+			break;
+
 		default:
 			_TRACE("ERROR: Invalid variety passed, cannot calculate position type. Variety [" + variety + "]");
 			break;

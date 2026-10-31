@@ -1121,3 +1121,66 @@ function atRunCommand(csv, description) {
 
 	return result;
 }
+
+/**
+* Looks up one option contract from a choice such as NIFTY, CE, ATM, weekly.
+* Returns the classification; on AT_HTTP_OK the contract is in atOptionExchange,
+* atOptionSymbol, atOptionLotSize, atOptionStrike and atOptionExpiry.
+*
+* A read, not a command: nothing is placed, so an unreachable server is worth
+* asking again. It is still always a request (there is no cache in front of
+* it), so call it when you are about to place an order, never on every bar.
+*
+* spotHint is sent only when spotUse is True: the strike is then worked out from
+* that price instead of the live index price.
+*/
+function atLookupOption(pseudoAccount, exchange, underlying, optionType, strike, expiry, spotHint, spotUse) {
+	global atHttpResponse;
+	global atLogDurationMs;
+	global atOptionExchange;
+	global atOptionSymbol;
+	global atOptionLotSize;
+	global atOptionStrike;
+	global atOptionExpiry;
+
+	postBody = "api-key=" + atUrlEncode(AT_API_KEY) +
+		"&pseudoAccount=" + atUrlEncode(pseudoAccount) +
+		"&exchange=" + atUrlEncode(exchange) +
+		"&underlying=" + atUrlEncode(underlying) +
+		"&optionType=" + atUrlEncode(optionType) +
+		"&strike=" + atUrlEncode(strike) +
+		"&expiry=" + atUrlEncode(expiry);
+
+	if(spotUse) {
+		postBody = postBody + "&spotUse=true&spotHint=" + NumToStr(spotHint, 1.2, False);
+	}
+
+	target = underlying + " " + optionType + " " + strike + " " + expiry;
+	atHttpTrace("option lookup: " + target);
+
+	atHttpResponse = atHttpPost("/csv/option-contract", postBody);
+	httpStatus = atClassify(atHttpResponse, False);
+	atRecordStatus(httpStatus, atHttpResponse, False);
+
+	atHttpTrace("reply: " + atHttpResponse);
+
+	if(httpStatus == AT_HTTP_OK) {
+		atOptionExchange = atPipeField(atHttpResponse, 2);
+		atOptionSymbol = atPipeField(atHttpResponse, 3);
+		atOptionLotSize = StrToNum(atPipeField(atHttpResponse, 4));
+		atOptionStrike = StrToNum(atPipeField(atHttpResponse, 5));
+		atOptionExpiry = atPipeField(atHttpResponse, 6);
+		detail = atOptionSymbol + " lot=" + atOptionLotSize;
+	} else {
+		atOptionExchange = "";
+		atOptionSymbol = "";
+		atOptionLotSize = 0;
+		atOptionStrike = 0;
+		atOptionExpiry = "";
+		detail = atHttpMessage;
+	}
+
+	atLogWrite(AT_LOG_READ, pseudoAccount, target, AT_LOG_NETWORK, httpStatus, atLogDurationMs, detail);
+
+	return httpStatus;
+}

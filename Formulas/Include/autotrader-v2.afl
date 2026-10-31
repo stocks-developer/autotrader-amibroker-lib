@@ -23,6 +23,13 @@
 *
 ******************************************************************************/
 
+/*
+* Where AmiBroker is installed, for logs-util.afl. Without this it assumed
+* C:\Program Files\AmiBroker, and on any other install folder the log file was
+* silently never written. fgetcwd() needs 6.10; this library needs 6.30 anyway.
+*/
+AMIBROKER_HOME = fgetcwd();
+
 /* Import public amibroker libraries */
 
 #include_once<misc-util.afl>

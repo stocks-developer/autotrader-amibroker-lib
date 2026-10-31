@@ -33,9 +33,9 @@
 * BANKNIFTY-II,25
 * NIFTY-I,75
 *******************************************************************
-* User Guide: https://stocksdeveloper.in/documentation/index/
+* User Guide: https://stocksdeveloper.in/documentation/client-setup/amibroker-library/
 * API Docs: https://stocksdeveloper.in/documentation/api/
-* Symbol Search: https://stocksdeveloper.in:9013/instrument
+* Symbol Search: https://webx.stocksdeveloper.in/instrument (Tools -> Instruments)
 * 
 * Author - Stocks Developer
 */

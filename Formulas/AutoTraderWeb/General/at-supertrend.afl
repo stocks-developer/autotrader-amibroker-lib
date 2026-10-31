@@ -2,9 +2,9 @@
 * AmiBroker supertrend with square-off option. 
 * You need to set appropriate values in chart parameters.
 * 
-* User Guide: https://stocksdeveloper.in/documentation/index/
+* User Guide: https://stocksdeveloper.in/documentation/client-setup/amibroker-library/
 * API Docs: https://stocksdeveloper.in/documentation/api/
-* Symbol Search: https://stocksdeveloper.in:9013/instrument
+* Symbol Search: https://webx.stocksdeveloper.in/instrument (Tools -> Instruments)
 * 
 * Author - Stocks Developer
 */

@@ -1,0 +1,200 @@
+/**
+* AmiBroker moving average crossover that trades OPTIONS from an index chart.
+* You need to set appropriate values in chart parameters.
+*
+* Apply it to your index chart (for example NIFTY). The signals come from the
+* index; the orders are for its options, chosen in words:
+*
+*   Buy signal  -> square off the put (if this chart holds one), buy a call
+*   Sell signal -> square off the call (if this chart holds one), buy a put
+*
+* Which option: the strike ("ATM", "ITM1", "OTM2", "ATM+1" ...) and expiry
+* ("weekly", "next", "monthly") are chart parameters. The library looks the
+* contract up when it places the order, and remembers it, so the square-off
+* sells THAT contract even after the index has moved. Quantity is in LOTS.
+*
+* This is a sample to show the functions, not a strategy we recommend. Test it
+* on one chart, with 1 lot, in one account, before anything else.
+*
+* BEFORE YOU RUN IT: open Formulas\Include\autotrader-http-config.afl and put
+* your API key in it. Get the key from your account settings at
+* https://webx.stocksdeveloper.in/
+*
+* Needs AmiBroker 6.30 or newer.
+*
+* User Guide: https://stocksdeveloper.in/documentation/client-setup/amibroker-library/
+* API Docs: https://stocksdeveloper.in/documentation/api/
+*
+* Author - Stocks Developer
+*/
+
+/********************************************************************
+* SECTION 1 - BEGIN
+* This section contains all includes & should be at the top of your strategy afl.
+********************************************************************/
+
+#include <autotrader-v2.afl>
+
+#include <autotrader-square-off.afl>
+#include <autotrader-next-bar.afl>
+
+/********************************************************************
+* SECTION 1 - END
+********************************************************************/
+
+
+/*******************************************************************
+* How to see strategy logs in AmiBroker?
+* 1. Enable log window from amibroker menu (Window -> Log)
+* 2. You will see log window at the bottom.
+* 3. Go to "Trace" tab.
+* 4. RIGHT-CLICK inside the log window, then Trace Output -> tick "Internal".
+*
+* Step 4 is easy to miss and nothing is logged without it. "Internal" is NOT
+* ticked by default, so until you tick it the Trace tab stays empty however
+* well your strategy is running.
+********************************************************************/
+
+
+/********************************************************************
+* SECTION 2 - BEGIN
+* This section contains your strategy afl code.
+********************************************************************/
+
+_SECTION_BEGIN("Options");
+
+// The index the options are on, and the exchange of that index
+OPT_UNDERLYING = ParamStr("Option underlying", "NIFTY");
+OPT_EXCHANGE = ParamList("Underlying exchange", "NSE|BSE");
+
+// Which option: strike choice, expiry choice, and how many lots
+OPT_STRIKE = ParamStr("Option strike (ATM, ITM1, OTM2, ATM+1)", "ATM");
+OPT_EXPIRY = ParamList("Option expiry", "weekly|next|monthly");
+OPT_LOTS = Param("Lots", 1, 1, 100, 1);
+
+_SECTION_END();
+
+_SECTION_BEGIN("Moving Average");
+
+SHORT_MA_PERIOD = Param("Short term moving average period", 20, 1, 200, 2);
+LONG_MA_PERIOD = Param("Long term moving average period", 40, 1, 200, 2);
+
+// Refresh even when minimized, see below link
+// https://forum.amibroker.com/t/program-pauses-when-amibroker-minimized/4145/2
+RefreshPeriod = Param( "Timed Refresh Period", 5, 1, 300);
+RequestTimedRefresh(RefreshPeriod, False);
+
+EMA1 = EMA( C, SHORT_MA_PERIOD);
+EMA2 = EMA( C, LONG_MA_PERIOD);
+
+Buy = Cross(EMA1,EMA2);
+Sell = Cross(EMA2,EMA1);
+
+Buy = ExRem(Buy,Sell);
+Sell = ExRem(Sell,Buy);
+
+// This is only added for backtesting
+Short=Sell;
+Cover=Buy;
+
+shape = Buy * shapeUpArrow + Sell * shapeDownArrow;
+PlotShapes( shape, IIf( Buy, colorGreen, colorRed ), 0, IIf( Buy, Low, High ) );
+GraphXSpace = 5;
+
+Plot(EMA1,"EMA", colorRed);
+Plot(EMA2,"EMA2", colorGreen);
+Plot(C, "Close", colorRed, styleCandle);
+
+_SECTION_END();
+
+/********************************************************************
+* SECTION 2 - END
+********************************************************************/
+
+
+/********************************************************************
+* SECTION 3 - BEGIN
+* This section contains your code for placing orders.
+********************************************************************/
+
+/*
+* Handles whatever came back from a place...Order() call:
+*
+*   an order id  the broker accepted it (the broker's own order id).
+*   UNCONFIRMED  it reached the broker and nobody confirmed it. It MAY BE LIVE.
+*                Never send it again -- look at your order book.
+*   blank        it was not placed. The reason is in the Trace tab.
+*/
+procedure handleOrderResult(orderId, what) {
+	if(isOrderUnconfirmed(orderId)) {
+		message = "*** " + what + " WAS NOT CONFIRMED. It may be live at your " +
+			"broker. Check your order book before trading again.";
+		logError(message);
+		_TRACE(message);
+
+	} else if(orderId == "") {
+		message = what + " was not placed.";
+		logError(message);
+		_TRACE(message);
+
+	} else {
+		_TRACE(what + " placed: " + getLastOptionSymbol(AT_ACCOUNT, OPT_UNDERLYING,
+			StrRight(what, 2)) + ", order id " + orderId);
+	}
+}
+
+/*
+* Squares off whichever option this chart holds for one side, if any.
+*/
+procedure squareOffSide(optionType) {
+	if(hasOptionPosition(AT_ACCOUNT, OPT_UNDERLYING, optionType)) {
+		squareOffOptionPosition(AT_ACCOUNT, OPT_UNDERLYING, optionType, AT_PRODUCT_TYPE);
+	}
+}
+
+if(shouldSquareOff()) {
+	if(!isSquareOffRequestSent()) {
+		// Past the square-off time: close both sides
+		squareOffSide("CE");
+		squareOffSide("PE");
+
+		saveStaticVariable(AT_ACCOUNT, AT_SQUARE_OFF_STATUS_KEY, 1);
+	}
+}
+else {
+
+	BuySignal = Buy;
+	SellSignal = Sell;
+
+	if(AT_PLACE_ORDER_ON_NEXT_BAR) {
+		// Use signals from previous bar (when place order on next bar is turned on)
+		BuySignal = Ref(Buy, -1);
+		SellSignal = Ref(Sell, -1);
+	}
+
+	if ( LastValue(BuySignal) == True && isNewBar() )
+	{
+		squareOffSide("PE");
+
+		orderId = placeOptionOrder(AT_ACCOUNT, OPT_EXCHANGE, OPT_UNDERLYING,
+			"CE", OPT_STRIKE, OPT_EXPIRY, "BUY", AT_ORDER_MARKET,
+			AT_PRODUCT_TYPE, OPT_LOTS, 0, 0, True);
+
+		handleOrderResult(orderId, "BUY CE");
+	}
+
+	if ( LastValue(SellSignal) == True && isNewBar() )
+	{
+		squareOffSide("CE");
+
+		orderId = placeOptionOrder(AT_ACCOUNT, OPT_EXCHANGE, OPT_UNDERLYING,
+			"PE", OPT_STRIKE, OPT_EXPIRY, "BUY", AT_ORDER_MARKET,
+			AT_PRODUCT_TYPE, OPT_LOTS, 0, 0, True);
+
+		handleOrderResult(orderId, "BUY PE");
+	}
+}
+
+/********************************************************************
+* SECTION 3 - END
+********************************************************************/

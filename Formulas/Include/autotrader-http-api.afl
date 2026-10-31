@@ -68,6 +68,14 @@ AT_PRICE_PRECISION = StrToNum(ParamList(
 AT_DEBUG = ParamToggle("Print Additional Logs", "OFF|ON", 0);
 
 /*
+* Which price decides the at-the-money strike for placeOptionOrder(). The live
+* index price is the default. "Chart price" uses this chart's last close
+* instead: choose it only when this chart IS the index (not its future, whose
+* price differs by enough to move the strike).
+*/
+AT_OPTION_STRIKE_FROM = ParamList("Option strike from", "Live index price|Chart price");
+
+/*
 * Used for avoiding repeat orders. Repeat orders are back to back buy or 
 * sell orders. The system will not accept an order in this many seconds, 
 * if an order for same stock, tradeType was sent earlier from the same chart.
@@ -149,6 +157,13 @@ function orderString(variety, symbol, tradeType, orderType, quantity,
 	} else if (variety == AT_VARIETY_CO) {
 		result = "Cover Order [" + conciseForm + "|" + "trigger=" +
 			triggerPrice +  "]";
+	} else if (variety == AT_VARIETY_AT_BO) {
+		result = "AutoTrader Bracket Order [" + conciseForm + "|" +
+			"t=" + target + "|" + "sl=" + stoploss + "|" +
+			"tr. sl=" + trailingStoploss + "]";
+	} else if (variety == AT_VARIETY_AT_CO) {
+		result = "AutoTrader Cover Order [" + conciseForm + "|" +
+			"sl=" + stoploss + "|" + "tr. sl=" + trailingStoploss + "]";
 	} else {
 		result = "Regular Order [" + conciseForm + "]";
 	}
@@ -819,9 +834,60 @@ function placeCoverOrder(account, exchange, symbol, tradeType, orderType,
 
 }
 
+/*
+* Places an AutoTrader bracket order: an intraday entry with a target, a
+* stoploss and an optional trailing stoploss, watched by AutoTrader Web. Unlike
+* placeBracketOrder(), which needs your broker to offer bracket orders, this
+* works on every broker. Returns the broker's order id for the entry; otherwise
+* blank or AT_UNCONFIRMED.
+*
+* target, stoploss and trailingStoploss are distances in rupees from your entry
+* price, not prices: a buy filled at 180.50 with target 5 and stoploss 2.5 exits
+* at 185.50 or 178.00. trailingStoploss is the step the stop moves by, and needs
+* a stoploss with it. Pass triggerPrice only for a stop-loss entry, else zero.
+*
+* Intraday only: it squares itself off shortly before the market closes. To exit
+* early, square off the position; the bracket then ends by itself.
+*/
+function placeAutoTraderBracketOrder(account, exchange, symbol, tradeType,
+	orderType, quantity, price, triggerPrice, target, stoploss,
+	trailingStoploss, validate) {
+
+	return placeOrderAdvanced(AT_VARIETY_AT_BO, account, exchange, symbol,
+		tradeType, orderType, AT_PRODUCT_INTRADAY,
+		quantity, price, triggerPrice,
+		target, stoploss, trailingStoploss,
+		defaultDisclosedQuantity(), defaultValidity(), defaultAmo(),
+		defaultStrategyId(), defaultComments(), validate);
+
+}
+
+/*
+* Places an AutoTrader cover order: an intraday entry with a stoploss (and an
+* optional trailing stoploss) but no target, watched by AutoTrader Web. Works
+* on every broker. Returns the broker's order id for the entry; otherwise blank
+* or AT_UNCONFIRMED.
+*
+* Note the difference from placeCoverOrder(): there is no trigger price. The
+* stop is a distance in rupees from your entry price, in stoploss, exactly as
+* in placeAutoTraderBracketOrder().
+*/
+function placeAutoTraderCoverOrder(account, exchange, symbol, tradeType,
+	orderType, quantity, price, stoploss, trailingStoploss, validate) {
+
+	return placeOrderAdvanced(AT_VARIETY_AT_CO, account, exchange, symbol,
+		tradeType, orderType, AT_PRODUCT_INTRADAY,
+		quantity, price, 0,
+		defaultTarget(), stoploss, trailingStoploss,
+		defaultDisclosedQuantity(), defaultValidity(), defaultAmo(),
+		defaultStrategyId(), defaultComments(), validate);
+
+}
+
 /*****************************************************************************/
 /************************ PLACE ORDER FUNCTIONS - END ************************/
 /*****************************************************************************/
+
 
 
 /*****************************************************************************/
@@ -1956,4 +2022,245 @@ function getHoldingCurrentValue(pseudoAccount, symbol) {
 
 /*****************************************************************************/
 /************************ HOLDING DETAIL FUNCTIONS - END **********************/
+/*****************************************************************************/
+
+/*****************************************************************************/
+/*********************** OPTION ORDER FUNCTIONS - START **********************/
+/*****************************************************************************/
+
+/*
+* Trade an option from a signal on its index (or stock) chart, without
+* spelling out the option's symbol: say which one in words, the same words
+* TradingView alerts use.
+*
+*   optionType : "CE" or "PE"
+*   strike     : "ATM", "ITM1", "OTM2", "ATM+1", "ATM-2", or an exact strike
+*                such as "24500"
+*   expiry     : "weekly" (the nearest), "next", "monthly", or a date such as
+*                "2026-07-30"
+*   lots       : number of LOTS, not units. The library multiplies by the
+*                contract's lot size, so a lot size change needs no AFL change.
+*
+* The contract is looked up when the order is placed, and remembered, so that
+* squareOffOptionPosition() later squares off THAT contract -- not whatever is
+* at the money by then. Index and stock options only (not commodity or
+* currency options).
+*/
+
+AT_OPTION_SYMBOL_KEY = "AT_OPTION_SYMBOL";
+AT_OPTION_EXCHANGE_KEY = "AT_OPTION_EXCHANGE";
+
+/*
+* One name per account, underlying and call/put. The repeat order guard and the
+* remembered contract are both kept under it, because the contract itself can
+* change from one signal to the next as the index moves.
+*/
+function optionKey(account, underlying, optionType) {
+	return account + "-" + StrToUpper(underlying) + "-" + StrToUpper(optionType);
+}
+
+/*
+* Remembered with persist on, so an AmiBroker restart during the day does not
+* forget which contract an open position is in. Chart specific, like the rest
+* of the library's state.
+*/
+procedure saveOptionContract(account, underlying, optionType, exchange, symbol) {
+	global amiStaticVarKey;
+	key = optionKey(account, underlying, optionType) + amiStaticVarKey;
+	StaticVarSetText(key + AT_OPTION_SYMBOL_KEY, symbol, True);
+	StaticVarSetText(key + AT_OPTION_EXCHANGE_KEY, exchange, True);
+}
+
+/*
+* The option contract this chart last traded for this account, underlying and
+* call/put, or blank if it has traded none.
+*/
+function getLastOptionSymbol(account, underlying, optionType) {
+	global amiStaticVarKey;
+	return StaticVarGetText(optionKey(account, underlying, optionType) + amiStaticVarKey + AT_OPTION_SYMBOL_KEY);
+}
+
+function getLastOptionExchange(account, underlying, optionType) {
+	global amiStaticVarKey;
+	return StaticVarGetText(optionKey(account, underlying, optionType) + amiStaticVarKey + AT_OPTION_EXCHANGE_KEY);
+}
+
+/*
+* Looks up the option contract for a choice, without placing anything. Returns
+* its symbol, or blank if it could not be found (the reason is in the trace
+* window). After a successful call, atOptionExchange, atOptionLotSize,
+* atOptionStrike and atOptionExpiry hold the rest.
+*
+* Every call is a request, so call it when you need it, not on every bar.
+*/
+function getOptionSymbol(account, exchange, underlying, optionType, strike, expiry) {
+	global atOptionSymbol;
+
+	useChart = AT_OPTION_STRIKE_FROM == "Chart price";
+	httpStatus = atLookupOption(account, exchange, underlying, optionType, strike, expiry,
+		LastValue(Close), useChart);
+
+	result = "";
+	if(httpStatus == AT_HTTP_OK) {
+		result = atOptionSymbol;
+	} else {
+		message = "SD-ERR-AB-OPTION: Option lookup failed [" + underlying + " " + optionType + " " +
+			strike + " " + expiry + "]. " + atHttpMessage;
+		logError(message);
+		_TRACE(message);
+	}
+
+	return result;
+}
+
+/*
+* The work behind placeOptionOrder() and placeOptionBracketOrder().
+*/
+function placeOptionOrderInternal(variety, account, exchange, underlying,
+	optionType, strike, expiry, tradeType, orderType, productType, lots,
+	price, triggerPrice, target, stoploss, trailingStoploss, validate) {
+
+	global atOptionExchange;
+	global atOptionLotSize;
+
+	orderId = "";
+	key = optionKey(account, underlying, optionType);
+	description = underlying + " " + optionType + " " + strike + " " + expiry + " " +
+		tradeType + " " + lots + " lot(s)";
+
+	/*
+	* Checked BEFORE the lookup, under the underlying rather than the contract:
+	* a refreshing chart must not send a second order just because the index
+	* moved and ATM became the next strike.
+	*/
+	proceed = True;
+	if(validate AND isDuplicateSignal(account, tradeType, key)) {
+		message = "Option order failed validation: " + description;
+		logError(message);
+		_TRACE(message);
+		proceed = False;
+	}
+
+	if(proceed AND lots <= 0) {
+		message = "SD-ERR-AB-OPTION: Lots must be 1 or more: " + description;
+		logError(message);
+		_TRACE(message);
+		proceed = False;
+	}
+
+	if(proceed) {
+		symbol = getOptionSymbol(account, exchange, underlying, optionType, strike, expiry);
+
+		if(symbol != "") {
+			quantity = lots * atOptionLotSize;
+
+			// The guard has already run, under the key above
+			orderId = placeOrderAdvanced(variety, account, atOptionExchange, symbol,
+				tradeType, orderType, productType,
+				quantity, price, triggerPrice,
+				target, stoploss, trailingStoploss,
+				defaultDisclosedQuantity(), defaultValidity(), defaultAmo(),
+				defaultStrategyId(), defaultComments(), False);
+
+			if(orderId != "") {
+				// Placed, or possibly placed (AT_UNCONFIRMED): either way, never resend
+				saveLastOrderTradeType(account, key, tradeType);
+				saveLastOrderTime(account, key, Now(5));
+				saveOptionContract(account, underlying, optionType, atOptionExchange, symbol);
+			}
+		}
+	}
+
+	return orderId;
+}
+
+/*
+* Places a regular order for an option chosen in words, for example:
+*
+*   placeOptionOrder(AT_ACCOUNT, "NSE", "NIFTY", "CE", "ATM", "weekly",
+*       "BUY", "MARKET", AT_PRODUCT_INTRADAY, 1, 0, 0, True);
+*
+* exchange is the UNDERLYING's exchange (NSE for NIFTY, BSE for SENSEX).
+* lots is a number of lots. For a MARKET order pass price 0. A LIMIT or
+* stop-loss price is the OPTION's price, not the index's.
+*
+* Returns the broker's order id; otherwise blank or AT_UNCONFIRMED.
+*/
+function placeOptionOrder(account, exchange, underlying, optionType, strike,
+	expiry, tradeType, orderType, productType, lots, price, triggerPrice,
+	validate) {
+
+	return placeOptionOrderInternal(defaultVariety(), account, exchange,
+		underlying, optionType, strike, expiry, tradeType, orderType,
+		productType, lots, price, triggerPrice,
+		defaultTarget(), defaultStoploss(), defaultTrailingStoploss(), validate);
+}
+
+/*
+* Places an AutoTrader bracket order for an option chosen in words: an
+* intraday entry with a target, a stoploss and an optional trailing stoploss,
+* watched by AutoTrader Web, on every broker. Target, stoploss and trailing
+* stoploss are distances in rupees from the option's entry price.
+*
+*   placeOptionBracketOrder(AT_ACCOUNT, "NSE", "NIFTY", "CE", "ATM", "weekly",
+*       "BUY", "MARKET", 1, 0, 0, 20, 10, 0, True);
+*
+* Returns the broker's order id for the entry; otherwise blank or
+* AT_UNCONFIRMED.
+*/
+function placeOptionBracketOrder(account, exchange, underlying, optionType,
+	strike, expiry, tradeType, orderType, lots, price, triggerPrice, target,
+	stoploss, trailingStoploss, validate) {
+
+	return placeOptionOrderInternal(AT_VARIETY_AT_BO, account, exchange,
+		underlying, optionType, strike, expiry, tradeType, orderType,
+		AT_PRODUCT_INTRADAY, lots, price, triggerPrice,
+		target, stoploss, trailingStoploss, validate);
+}
+
+/*
+* True if this chart has an option position open for this account, underlying
+* and call/put: one it placed and has not yet squared off.
+*/
+function hasOptionPosition(account, underlying, optionType) {
+	return getLastOptionSymbol(account, underlying, optionType) != "";
+}
+
+/*
+* Squares off the option position this chart last opened for this account,
+* underlying and call/put -- the same contract, wherever the index is now.
+* productType is the one the position was opened with (an option bracket order
+* is AT_PRODUCT_INTRADAY). Returns True if the square-off was accepted.
+*/
+function squareOffOptionPosition(account, underlying, optionType, productType) {
+	symbol = getLastOptionSymbol(account, underlying, optionType);
+
+	result = False;
+	if(symbol == "") {
+		message = "SD-ERR-AB-OPTION: No option position was opened from this chart for " +
+			account + " " + underlying + " " + optionType + ", so there is nothing to square off.";
+		logError(message);
+		_TRACE(message);
+	} else {
+		positionType = AT_POSITION_MIS;
+		if(productType == AT_PRODUCT_DELIVERY) {
+			positionType = AT_POSITION_CNC;
+		} else if(productType == AT_PRODUCT_NORMAL) {
+			positionType = AT_POSITION_NRML;
+		}
+
+		result = squareOffPosition(account, "DAY", positionType,
+			getLastOptionExchange(account, underlying, optionType), symbol);
+
+		if(result) {
+			// Squared off: nothing open from this chart any more, so a later call has nothing to do
+			saveOptionContract(account, underlying, optionType, "", "");
+		}
+	}
+
+	return result;
+}
+
+/*****************************************************************************/
+/************************ OPTION ORDER FUNCTIONS - END ***********************/
 /*****************************************************************************/

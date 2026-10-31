@@ -26,9 +26,9 @@
 * You need to set appropriate values in chart parameters.
 * 
 * Button Article: https://stocksdeveloper.in/amibroker-multi-account-button-trading/
-* User Guide: https://stocksdeveloper.in/documentation/index/
+* User Guide: https://stocksdeveloper.in/documentation/client-setup/amibroker-library/
 * API Docs: https://stocksdeveloper.in/documentation/api/
-* Symbol Search: https://web.stocksdeveloper.in/instrument
+* Symbol Search: https://webx.stocksdeveloper.in/instrument (Tools -> Instruments)
 * 
 * Author - Stocks Developer
 */

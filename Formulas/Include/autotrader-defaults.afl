@@ -16,6 +16,15 @@ AT_VARIETY_REGULAR = "REGULAR";
 AT_VARIETY_BO = "BO";
 AT_VARIETY_CO = "CO";
 
+/*
+* AutoTrader's own bracket and cover orders. The entry goes to the broker as a
+* plain intraday order and AutoTrader Web watches the target and stoploss, so
+* they work on every broker, including those with no bracket order of their own.
+* Direct (HTTP) library only.
+*/
+AT_VARIETY_AT_BO = "AT_BO";
+AT_VARIETY_AT_CO = "AT_CO";
+
 AT_PRODUCT_INTRADAY = "INTRADAY";
 AT_PRODUCT_DELIVERY = "DELIVERY";
 AT_PRODUCT_NORMAL = "NORMAL";

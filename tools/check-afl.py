@@ -91,7 +91,7 @@ STRING_FUNCS = {
 KEYWORDS = {
     "if", "else", "for", "while", "do", "return", "function", "procedure",
     "global", "local", "true", "false", "and", "or", "not", "break",
-    "continue", "switch", "case", "default",
+    "continue", "switch", "case", "default", "typeof",
 }
 
 

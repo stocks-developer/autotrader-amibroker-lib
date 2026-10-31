@@ -33,9 +33,13 @@ LOGS_DIRECTORY_CHECK = "LOGS_DIRECTORY_CHECK";
 LOGS_ERRORS_FOUND = "LOGS_ERRORS_FOUND";
 
 /* AmiBroker Home */
-// Note this will differ from one system to another. 
-// As of AmiBroker version 6.0, there is no way to get the installation directory.
-AMIBROKER_HOME = "C:\\Program Files\\AmiBroker";
+// Note this will differ from one system to another.
+// AmiBroker 6.10 and newer can tell us (fgetcwd), and autotrader-v2.afl sets it that way
+// before including this file. Older versions have no way to get the installation
+// directory, so they keep the default below (change "Log files directory" if needed).
+if(typeof(AMIBROKER_HOME) == "undefined") {
+	AMIBROKER_HOME = "C:\\Program Files\\AmiBroker";
+}
 
 /* Default logs directory */
 LOGS_DIRECTORY_DEFAULT = AMIBROKER_HOME + "\\" + "Logs";
