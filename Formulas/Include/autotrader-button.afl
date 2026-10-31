@@ -4,7 +4,8 @@ _SECTION_BEGIN("AutoTrader Buttons");
 AT_ACCOUNTS = ParamStr("Accounts (comma separated)", "ACC1,ACC2,ACC3");
 
 CellHeight = Param("Cell Height",30,5,200,1); 
-CellWidth = Param("Cell Width",150,5,200,1); 
+// 200 wide by default: at 150, "Square Off" was cut off on screens scaled to 200%
+CellWidth = Param("Cell Width",200,5,400,1);
 PanelYoffset = Param("Cell Row Offset (px)",30,0,Status("pxheight"),1); 
 PanelXoffset = Param("Cell Column Offset (px)",20,0,Status("pxwidth"),1); 
 FontRatio = Param("Font: CellHeight ratio",3,1,20,0.1);

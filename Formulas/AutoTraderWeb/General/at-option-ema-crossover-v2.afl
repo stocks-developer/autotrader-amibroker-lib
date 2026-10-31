@@ -13,6 +13,10 @@
 * contract up when it places the order, and remembers it, so the square-off
 * sells THAT contract even after the index has moved. Quantity is in LOTS.
 *
+* In the "AutoTrader" part of the chart parameters, Account and Product Type
+* are used here, but Exchange, Symbol and Quantity are NOT: the option comes
+* from the "Options" part, and its size from Lots.
+*
 * This is a sample to show the functions, not a strategy we recommend. Test it
 * on one chart, with 1 lot, in one account, before anything else.
 *

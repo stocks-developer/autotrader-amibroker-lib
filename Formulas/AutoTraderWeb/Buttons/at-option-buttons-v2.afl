@@ -15,6 +15,11 @@
 * SQUARE OFF sells THAT contract even after the index has moved. Quantity is
 * in LOTS.
 *
+* Put your accounts in "Accounts (comma separated)". In the "AutoTrader"
+* part of the chart parameters only Product Type is used here: its Account,
+* Exchange, Symbol and Quantity are NOT (the option comes from the "Options"
+* part, and its size from Lots).
+*
 * "Order with" = "AutoTrader target + stoploss" places an AutoTrader bracket
 * order instead: AutoTrader Web watches the target and the stoploss (rupees
 * from the option's entry price) and closes the position by itself, on every
