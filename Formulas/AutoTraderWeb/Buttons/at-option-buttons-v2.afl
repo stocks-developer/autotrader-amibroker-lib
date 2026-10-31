@@ -1,0 +1,190 @@
+/**
+* AmiBroker OPTION buttons: one click places the same option order in
+* several accounts.
+* You need to set appropriate values in chart parameters.
+*
+* Apply it to your index chart (for example NIFTY). Three buttons:
+*
+*   BUY CALL    buys a call in every account in "Accounts (comma separated)"
+*   BUY PUT     buys a put in every account
+*   SQUARE OFF  squares off the calls and puts these buttons opened
+*
+* Which option: the strike ("ATM", "ITM1", "OTM2", "ATM+1" ...) and expiry
+* ("weekly", "next", "monthly") are chart parameters. The library looks the
+* contract up when it places the order, and remembers it for each account, so
+* SQUARE OFF sells THAT contract even after the index has moved. Quantity is
+* in LOTS.
+*
+* "Order with" = "AutoTrader target + stoploss" places an AutoTrader bracket
+* order instead: AutoTrader Web watches the target and the stoploss (rupees
+* from the option's entry price) and closes the position by itself, on every
+* broker. A bracket order is always intraday.
+*
+* The Trace tab ends every click with "placed in N of M accounts".
+*
+* This is a sample to show the functions. Test it on one chart, with 1 lot,
+* in one account, before anything else.
+*
+* BEFORE YOU RUN IT: open Formulas\Include\autotrader-http-config.afl and put
+* your API key in it. Get the key from your account settings at
+* https://webx.stocksdeveloper.in/
+*
+* Needs AmiBroker 6.30 or newer.
+*
+* Button Article: https://stocksdeveloper.in/amibroker-multi-account-button-trading/
+* User Guide: https://stocksdeveloper.in/documentation/client-setup/amibroker-library/
+* API Docs: https://stocksdeveloper.in/documentation/api/
+*
+* Author - Stocks Developer
+*/
+
+#include <autotrader-button.afl>
+#include <autotrader-v2.afl>
+
+_SECTION_BEGIN("Options");
+
+// The index the options are on, and the exchange of that index
+OPT_UNDERLYING = ParamStr("Option underlying", "NIFTY");
+OPT_EXCHANGE = ParamList("Underlying exchange", "NSE|BSE");
+
+// Which option: strike choice, expiry choice, and how many lots
+OPT_STRIKE = ParamStr("Option strike (ATM, ITM1, OTM2, ATM+1)", "ATM");
+OPT_EXPIRY = ParamList("Option expiry", "weekly|next|monthly");
+OPT_LOTS = Param("Lots", 1, 1, 100, 1);
+
+_SECTION_END();
+
+_SECTION_BEGIN("Target and Stoploss");
+
+OPT_ORDER_WITH = ParamList("Order with", "Plain market order|AutoTrader target + stoploss");
+
+// Rupees from the option's entry price
+OPT_TARGET = Param("Target (rupees)", 20, 1, 1000, 1);
+OPT_STOPLOSS = Param("Stoploss (rupees)", 10, 1, 1000, 1);
+OPT_TRAILING_STOPLOSS = Param("Trailing stoploss (rupees, 0 = off)", 0, 0, 1000, 1);
+
+_SECTION_END();
+
+// A bracket order is intraday, so its square-off must be too
+OPT_USE_BRACKET = OPT_ORDER_WITH == "AutoTrader target + stoploss";
+OPT_PRODUCT = AT_PRODUCT_TYPE;
+if(OPT_USE_BRACKET) {
+	OPT_PRODUCT = AT_PRODUCT_INTRADAY;
+}
+
+/*
+* Buys one option in one account. Returns 1 if the broker accepted it, else 0.
+* What happened is written to the Trace tab either way.
+*/
+function buyOption(acc, optionType) {
+	if(OPT_USE_BRACKET) {
+		orderId = placeOptionBracketOrder(acc, OPT_EXCHANGE, OPT_UNDERLYING,
+			optionType, OPT_STRIKE, OPT_EXPIRY, "BUY", AT_ORDER_MARKET,
+			OPT_LOTS, 0, 0, OPT_TARGET, OPT_STOPLOSS, OPT_TRAILING_STOPLOSS, False);
+	} else {
+		orderId = placeOptionOrder(acc, OPT_EXCHANGE, OPT_UNDERLYING,
+			optionType, OPT_STRIKE, OPT_EXPIRY, "BUY", AT_ORDER_MARKET,
+			OPT_PRODUCT, OPT_LOTS, 0, 0, False);
+	}
+
+	placed = 0;
+	if(isOrderUnconfirmed(orderId)) {
+		message = "*** " + acc + ": BUY " + optionType + " WAS NOT CONFIRMED. It may be " +
+			"live at your broker. Check your order book before trading again.";
+		logError(message);
+		_TRACE(message);
+
+	} else if(orderId == "") {
+		message = acc + ": BUY " + optionType + " was not placed.";
+		logError(message);
+		_TRACE(message);
+
+	} else {
+		placed = 1;
+		_TRACE(acc + ": BUY " + optionType + " placed: " +
+			getLastOptionSymbol(acc, OPT_UNDERLYING, optionType) + ", order id " + orderId);
+	}
+
+	return placed;
+}
+
+/*
+* Buys the option in every account and reports how many took it.
+*/
+procedure buyInAllAccounts(optionType) {
+	placedCount = 0;
+	accountCount = 0;
+
+	for(iter = 0; !strIsEmpty(acc = StrTrim(StrExtract(AT_ACCOUNTS, iter), "")); iter++ ) {
+		accountCount++;
+		placedCount += buyOption(acc, optionType);
+	}
+
+	message = "BUY " + OPT_UNDERLYING + " " + optionType + " " + OPT_STRIKE + " " +
+		OPT_EXPIRY + ": placed in " + placedCount + " of " + accountCount + " accounts";
+	logInfo(message);
+	_TRACE(message);
+}
+
+/*
+* Squares off, in every account, the calls and puts these buttons opened.
+*/
+procedure squareOffAllAccounts() {
+	closedCount = 0;
+	accountCount = 0;
+
+	for(iter = 0; !strIsEmpty(acc = StrTrim(StrExtract(AT_ACCOUNTS, iter), "")); iter++ ) {
+		accountCount++;
+		closed = 0;
+
+		if(hasOptionPosition(acc, OPT_UNDERLYING, "CE")) {
+			closed += squareOffOptionPosition(acc, OPT_UNDERLYING, "CE", OPT_PRODUCT);
+		}
+		if(hasOptionPosition(acc, OPT_UNDERLYING, "PE")) {
+			closed += squareOffOptionPosition(acc, OPT_UNDERLYING, "PE", OPT_PRODUCT);
+		}
+
+		if(closed > 0) {
+			closedCount++;
+		} else {
+			_TRACE(acc + ": nothing squared off (no option opened from this chart, or the square-off failed).");
+		}
+	}
+
+	message = "SQUARE OFF " + OPT_UNDERLYING + " options: done in " + closedCount + " of " +
+		accountCount + " accounts";
+	logInfo(message);
+	_TRACE(message);
+}
+
+// Following code adds buttons to the screen
+Column_Begin( "1" );
+	BuyCallCommand = TriggerCell( "BUY CALL", colorBrightGreen, colorAqua, colorBlack);
+Column_End( );
+
+Column_Begin( "2" );
+	BuyPutCommand = TriggerCell( "BUY PUT", colorRed, colorLightOrange, colorBlack);
+Column_End( );
+
+Column_Begin( "3" );
+	SquareOffCommand = TriggerCell( "SQUARE OFF", colorYellow, colorGold, colorBlack);
+Column_End( );
+
+// Get co-ordinates
+ClickCoordinates = Nz(StaticVarGet("ClickCoordinates"));
+
+// Take action based on the button clicked by user
+switch( ClickCoordinates )
+{
+    case 101:
+		buyInAllAccounts("CE");
+		break;
+
+    case 201:
+		buyInAllAccounts("PE");
+		break;
+
+    case 301:
+		squareOffAllAccounts();
+		break;
+}

@@ -16,7 +16,7 @@ The **AutoTrader Web AmiBroker library** is an AFL library that lets you place o
 - **Broker independent.** The same strategy trades on any broker AutoTrader Web supports, across 40+ Indian brokers. No broker-specific code.
 - **Single or multi-account.** Send an order to one account or many at once.
 - **Ready-made samples.** Regular / bracket / cover orders, scanners, button trading and multi-account templates included.
-- **Options by strike choice.** From an index chart, buy the ATM, ITM or OTM option of the weekly or monthly expiry, in lots, and later square off that same contract (`placeOptionOrder`, `squareOffOptionPosition`). See `General/at-option-ema-crossover-v2.afl`.
+- **Options by strike choice.** From an index chart, buy the ATM, ITM or OTM option of the weekly or monthly expiry, in lots, and later square off that same contract (`placeOptionOrder`, `squareOffOptionPosition`). See `General/at-option-ema-crossover-v2.afl`, and `Buttons/at-option-buttons-v2.afl` for BUY CALL / BUY PUT / SQUARE OFF buttons that trade several accounts in one click.
 - **Target and stoploss on every broker.** AutoTrader bracket and cover orders (`placeAutoTraderBracketOrder`, `placeAutoTraderCoverOrder`, `placeOptionBracketOrder`), watched by AutoTrader Web, even where your broker has no bracket order.
 - **Direct connection.** Your AFL talks to AutoTrader Web over the internet. There is nothing else to install and nothing that has to keep running.
 
