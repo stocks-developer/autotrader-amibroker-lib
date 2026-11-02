@@ -176,7 +176,8 @@ else {
 		SellSignal = Ref(Sell, -1);
 	}
 
-	if ( LastValue(BuySignal) == True && isNewBar() )
+	// A chart refreshes many times inside one candle: once its option is open, do not ask again
+	if ( LastValue(BuySignal) == True && isNewBar() && !hasOptionPosition(AT_ACCOUNT, OPT_UNDERLYING, "CE") )
 	{
 		squareOffSide("PE");
 
@@ -187,7 +188,7 @@ else {
 		handleOrderResult(orderId, "BUY CE");
 	}
 
-	if ( LastValue(SellSignal) == True && isNewBar() )
+	if ( LastValue(SellSignal) == True && isNewBar() && !hasOptionPosition(AT_ACCOUNT, OPT_UNDERLYING, "PE") )
 	{
 		squareOffSide("CE");
 
