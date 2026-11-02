@@ -2249,8 +2249,12 @@ function squareOffOptionPosition(account, underlying, optionType, productType) {
 			positionType = AT_POSITION_NRML;
 		}
 
-		result = squareOffPosition(account, "DAY", positionType,
-			getLastOptionExchange(account, underlying, optionType), symbol);
+		// Brokers differ: some list an open position under NET only, others under DAY as well
+		exchange = getLastOptionExchange(account, underlying, optionType);
+		result = squareOffPosition(account, "NET", positionType, exchange, symbol);
+		if(! result) {
+			result = squareOffPosition(account, "DAY", positionType, exchange, symbol);
+		}
 
 		if(result) {
 			// Squared off: nothing open from this chart any more, so a later call has nothing to do
