@@ -36,11 +36,11 @@ RequestTimedRefresh(5, False);
 
 // A signal repeats until its candle closes: try only once in each candle.
 // A bracket closes by itself, so hasOptionPosition() cannot be the check here.
-candleTime = LastValue(DateTime());
+candleTime = DateTimeToStr(LastValue(DateTime()));
 
-if(LastValue(Buy) == True && StaticVarGet(Name() + "BracketCandle") != candleTime)
+if(LastValue(Buy) == True && StaticVarGetText(Name() + "BracketCandle") != candleTime)
 {
-	StaticVarSet(Name() + "BracketCandle", candleTime);
+	StaticVarSetText(Name() + "BracketCandle", candleTime);
 
 	// 2. Target 10, stoploss 5, no trailing stoploss
 	orderId = placeOptionBracketOrder(AT_ACCOUNT, "NSE", "NIFTY",
