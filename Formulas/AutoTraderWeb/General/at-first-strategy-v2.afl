@@ -1,0 +1,55 @@
+/**
+* Your first strategy: the smallest AFL that places an option order and squares
+* it off from your own code. Copy it into a new file and put your own rule in
+* part 1. Make sure your personal AFL files are NOT in the AutoTraderWeb folder.
+*
+* Part 1 is only an example of a rule, not a recommendation.
+*
+* ONCE ON A CHART, THIS CODE CAN PLACE REAL ORDERS. Read it before you fill in
+* Account in the chart's Parameters.
+*
+* Needs AmiBroker 6.30 or newer.
+*
+* User Guide: https://stocksdeveloper.in/documentation/client-setup/amibroker-library/
+* API Docs: https://stocksdeveloper.in/documentation/api/
+*
+* Author - Stocks Developer
+*/
+
+#include <autotrader-v2.afl>
+
+// 1. Your own rule
+Fast = EMA(Close, 5);
+Slow = EMA(Close, 20);
+Buy  = Cross(Fast, Slow);
+Sell = Cross(Slow, Fast);
+
+// Draw the chart, and re-check every 5 seconds
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(Fast, "Fast", colorRed);
+Plot(Slow, "Slow", colorGreen);
+PlotShapes(Buy * shapeUpArrow + Sell * shapeDownArrow,
+	IIf(Buy, colorGreen, colorRed), 0, IIf(Buy, Low, High));
+RequestTimedRefresh(5, False);
+
+// 2. On a buy signal, place the order
+if(LastValue(Buy) == True && !hasOptionPosition(AT_ACCOUNT, "NIFTY", "CE"))
+{
+	orderId = placeOptionOrder(AT_ACCOUNT, "NSE", "NIFTY",
+		"CE", "ATM", "weekly", "BUY", "MARKET",
+		AT_PRODUCT_INTRADAY, 1, 0, 0, True);
+
+	// 3. Check the answer
+	if(isOrderUnconfirmed(orderId))
+		_TRACE("NOT CONFIRMED. Do not send again. Check your order book.");
+	else if(orderId == "")
+		_TRACE("Order not placed.");
+	else
+		_TRACE("Order placed: " + orderId);
+}
+
+// 4. On a sell signal, square it off
+if(LastValue(Sell) == True && hasOptionPosition(AT_ACCOUNT, "NIFTY", "CE"))
+{
+	squareOffOptionPosition(AT_ACCOUNT, "NIFTY", "CE", AT_PRODUCT_INTRADAY);
+}

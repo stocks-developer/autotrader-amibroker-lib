@@ -1,0 +1,57 @@
+/**
+* Your first bracket order: an option order with a target and a stoploss, from
+* your own code, on every broker. AutoTrader Web watches both levels and squares
+* the position off by itself. Accept the AutoTrader bracket terms once in
+* AutoTrader Web first (order window, AT_BO).
+*
+* Target, stoploss and trailing stoploss are distances in rupees from your entry
+* price, not prices. A bracket order is intraday only.
+*
+* The rule in part 1 is only an example, not a recommendation.
+*
+* ONCE ON A CHART, THIS CODE CAN PLACE REAL ORDERS. Read it before you fill in
+* Account in the chart's Parameters.
+*
+* Needs AmiBroker 6.30 or newer.
+*
+* User Guide: https://stocksdeveloper.in/documentation/client-setup/amibroker-library/
+* API Docs: https://stocksdeveloper.in/documentation/api/
+*
+* Author - Stocks Developer
+*/
+
+#include <autotrader-v2.afl>
+
+// 1. Your own rule
+Fast = EMA(Close, 5);
+Slow = EMA(Close, 20);
+Buy  = Cross(Fast, Slow);
+
+// Draw the chart, and re-check every 5 seconds
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(Fast, "Fast", colorRed);
+Plot(Slow, "Slow", colorGreen);
+PlotShapes(Buy * shapeUpArrow, colorGreen, 0, Low);
+RequestTimedRefresh(5, False);
+
+// A signal repeats until its candle closes: try only once in each candle.
+// A bracket closes by itself, so hasOptionPosition() cannot be the check here.
+candleTime = LastValue(DateTime());
+
+if(LastValue(Buy) == True && StaticVarGet(Name() + "BracketCandle") != candleTime)
+{
+	StaticVarSet(Name() + "BracketCandle", candleTime);
+
+	// 2. Target 10, stoploss 5, no trailing stoploss
+	orderId = placeOptionBracketOrder(AT_ACCOUNT, "NSE", "NIFTY",
+		"CE", "ATM", "weekly", "BUY", "MARKET",
+		1, 0, 0, 10, 5, 0, True);
+
+	// 3. Check the answer
+	if(isOrderUnconfirmed(orderId))
+		_TRACE("NOT CONFIRMED. Do not send again. Check your order book.");
+	else if(orderId == "")
+		_TRACE("Bracket order not placed.");
+	else
+		_TRACE("Bracket order placed: " + orderId);
+}
