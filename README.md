@@ -34,8 +34,8 @@ The **AutoTrader Web AmiBroker library** is an AFL library that lets you place o
 
 ## Why traders and developers choose us
 
-- 🆓 **Free static IP included** with every account. Saves up to **₹500 per broker account per month** that other tools charge extra for.
-- 💸 **One of the lowest prices in the category.** **₹295 to ₹495 per account per month**, all taxes and the static IP included. No setup fee, no hidden charges.
+- 🌐 **Static IP from ₹100 a month**, taxes included, or your own IPv4 at no charge on IPv4 brokers. Every broker needs one.
+- 💸 **One of the lowest prices in the category.** **₹295 to ₹495 per account per month**, all taxes included. A static IP is a small add-on. No setup fee, no hidden charges.
 - ☁️ **Nothing to install for the platform.** Monitor and trade from your browser on PC or mobile, from anywhere.
 - 🔗 **40+ Indian brokers on one platform.** One of the widest broker coverages available.
 - 🔁 **Two ways to copy trade**, PMS and master-child, both included.
@@ -54,7 +54,7 @@ AutoTrader Web works with **40+ Indian brokers**:
 
 AmiBroker talks to AutoTrader Web directly. Needs **AmiBroker 6.30 or newer**.
 
-1. Sign in at [webx.stocksdeveloper.in](https://webx.stocksdeveloper.in/) and go to **Tools -> Library**.
+1. Sign in at [webx.stocksdeveloper.in](https://webx.stocksdeveloper.in/) and go to **Tools -> Client Libraries**.
 2. Download the AmiBroker library. Your API key is already inside the download, which is why it asks for your password.
 3. Extract the zip into your AmiBroker folder -- the one that holds `Broker.exe`.
 4. Include the library at the top of your strategy AFL:
@@ -246,7 +246,7 @@ See [`tools/amibroker-harness/README.md`](tools/amibroker-harness/README.md) for
 ## Pricing and free trial
 
 - **Free 1-month trial** on supported brokers, with every feature included.
-- Then **₹295 to ₹495 per account per month**. All taxes and a free static IP are included. No setup fee, no hidden charges.
+- Then **₹295 to ₹495 per account per month**. All taxes are included. A static IP is a small add-on, from ₹100 a month. No setup fee, no hidden charges.
 - [See full pricing](https://stocksdeveloper.in/pricing/) · [Start free](https://webx.stocksdeveloper.in/register)
 
 ## Documentation and links
