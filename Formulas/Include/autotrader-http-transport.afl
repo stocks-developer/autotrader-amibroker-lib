@@ -1046,17 +1046,35 @@ atHttpResponse = "";
 function atSendCommand(csv) {
 	global atHttpResponse;
 	global atLogDurationMs;
+	global atHttpMessage;
+	global atHttpAction;
 
-	postBody = "api-key=" + atUrlEncode(AT_API_KEY) +
-		"&command=" + atUrlEncode(csv);
+	/*
+	* A backtest replays history, and its last bar can hold a live signal, so
+	* an order sent from one would be a real order. No command leaves a backtest:
+	* placing, modifying, cancelling and squaring off all come through here.
+	*/
+	actionId = Status("action");
 
-	atHttpTrace("command: " + csv);
+	if(actionId == actionBacktest OR actionId == actionPortfolio) {
+		atHttpResponse = "";
+		atLogDurationMs = 0;
+		atHttpAction = AT_ACTION_USER;
+		atHttpMessage = "Nothing was sent: orders are never sent from a backtest.";
+		httpStatus = AT_HTTP_ERROR;
 
-	atHttpResponse = atHttpPost("/csv/command", postBody);
-	httpStatus = atClassify(atHttpResponse, True);
-	atRecordStatus(httpStatus, atHttpResponse, True);
+	} else {
+		postBody = "api-key=" + atUrlEncode(AT_API_KEY) +
+			"&command=" + atUrlEncode(csv);
 
-	atHttpTrace("reply: " + atHttpResponse);
+		atHttpTrace("command: " + csv);
+
+		atHttpResponse = atHttpPost("/csv/command", postBody);
+		httpStatus = atClassify(atHttpResponse, True);
+		atRecordStatus(httpStatus, atHttpResponse, True);
+
+		atHttpTrace("reply: " + atHttpResponse);
+	}
 
 	/*
 	* A command is always a request -- there is no cache in front of it and
